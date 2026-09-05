@@ -53,6 +53,7 @@
 #include "fgmm_authentication_reject.h"
 #include "ds/byte_array.h"
 #include "key_nas_deriver.h"
+#include "openair3/NAS/COMMON/UTIL/nas_timer.h"
 #include "nr-uesoftmodem.h"
 
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
@@ -68,6 +69,8 @@ static const char hex[] = "0123456789abcdef";
 #endif
 
 static nr_ue_nas_t nr_ue_nas[MAX_NUM_NR_UE_INST] = {0};
+
+static void _fgmm_registration_abnormal_cases_cde(nr_ue_nas_t *user);
 
 nr_ue_nas_t *get_nr_ue_nas_info(uint8_t ue_inst)
 {
@@ -574,6 +577,61 @@ static int fill_guti(FGSMobileIdentity *mi, const Guti5GSMobileIdentity_t *guti)
   return 13;
 }
 
+static void delete_guti(Guti5GSMobileIdentity_t *guti) {
+  if (guti) {
+	free(guti);
+	guti = NULL;
+  }
+}
+
+static void delete_ksi(uint8_t *ksi) {
+	if (ksi) {
+	  free(ksi);
+	  ksi = NULL;
+	}
+}
+
+/****************************************************************************
+ **                                                                        **
+ ** Name:    fgmm_proc_authentication_delete()                          **
+ **                                                                        **
+ ** Description: Deletes the RAND and RES values stored into the volatile  **
+ **      memory of the Mobile Equipment and stop timer T3416, if   **
+ **      running, upon receipt of a SECURITY MODE COMMAND, SERVICE **
+ **      REJECT, TRACKING AREA UPDATE REJECT, TRACKING AREA UPDATE **
+ **      ACCEPT or AUTHENTICATION REJECT message; upon expiry of   **
+ **      timer  T3416; or if the UE  enters  the  EMM  state  EMM- **
+ **      DEREGISTERED or EMM-NULL.                                 **
+ **                                                                        **
+ **              3GPP TS 24.501, section 5.4.2.3                           **
+ **                                                                        **
+ ** Inputs:  None                                                      **
+ **      Others:    None                                       **
+ **                                                                        **
+ ** Outputs:     None                                                      **
+ **      Return:    RETURNok, RETURNerror                      **
+ **                                                                        **
+ ***************************************************************************/
+int fgmm_proc_authentication_delete(nr_ue_nas_t *user)
+{
+  LOG_FUNC_IN;
+
+  LOG_TRACE(INFO, "EMM-PROC  - Delete authentication data RAND and RES");
+
+  /* Stop timer T3516, if running */
+  if (user->fgmm_timer.T3516.id != NAS_TIMER_INACTIVE_ID) {
+    LOG_TRACE(INFO, "EMM-PROC  - Stop timer T3516 (%d)", user->fgmm_timer.T3516.id);
+	/* Stop timer T3516 */
+	user->fgmm_timer.T3516.id = nas_timer_stop(user->fgmm_timer.T3516.id);
+  }
+
+  /* Delete any previously stored RAND and RES */
+  memset(user->security.rand, 0, AUTH_RAND_SIZE);
+  memset(user->security.res, 0, AUTH_RES_SIZE);
+
+  LOG_FUNC_RETURN (RETURNok);
+}
+
 static int fill_fgstmsi(Stmsi5GSMobileIdentity_t *stmsi, const Guti5GSMobileIdentity_t *guti)
 {
   AssertFatal(guti != NULL, "UE has no GUTI\n");
@@ -619,10 +677,14 @@ static int fill_imeisv(FGSMobileIdentity *mi, const uicc_t *uicc)
  * @param identitytype Type of identity to fill
  * @return Encoded identity size in bytes, 0 on failure
  */
-static int nas_fill_5gs_mobile_identity(FGSMobileIdentity *mobile_identity, const nr_ue_nas_t *nas, uint8_t identitytype)
+static int nas_fill_5gs_mobile_identity(FGSMobileIdentity *mobile_identity, nr_ue_nas_t *nas, uint8_t identitytype)
 {
   switch (identitytype) {
     case FGS_MOBILE_IDENTITY_SUCI:
+
+	  /* Fresh SUCI, start T3519 timer */
+	  nas->fgmm_timer.T3519.id = nas_timer_start_ext(nas->UE_id, nas->fgmm_timer.T3519.sec, fgmm_expiry_t3519_handler, nas);
+
       return fill_suci(mobile_identity, nas->uicc);
     case FGS_MOBILE_IDENTITY_5G_GUTI:
       if (!nas->guti) {
@@ -811,12 +873,38 @@ static void derive_ue_keys(uint8_t *buf, nr_ue_nas_t *nas)
   printf("\n");
 }
 
+	
+/*
+ * Initialize 5G MM timers
+ */
+void _fgmm_timers_initialize(fgmm_timers_t *fgmm_timers) {
+  nas_timer_init();
+
+  fgmm_timers->T3502.id = NAS_TIMER_INACTIVE_ID;
+  fgmm_timers->T3502.sec = T3502_DEFAULT_VALUE;
+  fgmm_timers->T3510.id = NAS_TIMER_INACTIVE_ID;
+  fgmm_timers->T3510.sec = T3510_DEFAULT_VALUE;
+  fgmm_timers->T3511.id = NAS_TIMER_INACTIVE_ID;
+  fgmm_timers->T3511.sec = T3511_DEFAULT_VALUE;
+  fgmm_timers->T3516.id = NAS_TIMER_INACTIVE_ID;
+  fgmm_timers->T3516.sec = T3516_DEFAULT_VALUE;
+  fgmm_timers->T3517.id = NAS_TIMER_INACTIVE_ID;
+  fgmm_timers->T3517.sec = T3517_DEFAULT_VALUE;
+  fgmm_timers->T3519.id = NAS_TIMER_INACTIVE_ID;
+  fgmm_timers->T3519.sec = T3519_DEFAULT_VALUE;
+}
+
 nr_ue_nas_t *get_ue_nas_info(module_id_t module_id)
 {
   AssertFatal(module_id < MAX_NUM_NR_UE_INST, "Invalid module_id %d\n", module_id);
   if (!nr_ue_nas[module_id].uicc) {
     nr_ue_nas[module_id].uicc = checkUicc(module_id);
     nr_ue_nas[module_id].UE_id = module_id;
+    _fgmm_timers_initialize(&nr_ue_nas[module_id].fgmm_timer);
+	if (!nr_ue_nas[module_id].lowerlayer_data) {
+		nr_ue_nas[module_id].lowerlayer_data = calloc_or_fail(1, sizeof(lowerlayer_data_t));
+	}	
+	nr_ue_nas[module_id].fgmm_reg_data.attempt_count = 0;
   }
   return &nr_ue_nas[module_id];
 }
@@ -1027,6 +1115,18 @@ void generateRegistrationRequest(as_nas_info_t *initialNasMsg, nr_ue_nas_t *nas,
       initialNasMsg->nas_data[mac_start_octet + i] = mac[i];
     }
   }
+
+  nas->fgmm_reg_data.fgsregistrationtype = full_rr->fgsregistrationtype;
+  nas->fgmm_timer.T3502.id = nas_timer_stop(nas->fgmm_timer.T3502.id);
+  nas->fgmm_timer.T3511.id = nas_timer_stop(nas->fgmm_timer.T3511.id);
+
+  /* Start T3510 timer */
+  if (nas->fgmm_timer.T3510.id == NAS_TIMER_INACTIVE_ID) {
+	  nas->fgmm_timer.T3510.id = nas_timer_start_ext(nas->UE_id, nas->fgmm_timer.T3510.sec, fgmm_expiry_t3510_handler, nas);
+	  LOG_I(NAS, "5G MM-PROC  - Timer T3510 (%d) started. Expires in %ld seconds\n",
+				 nas->fgmm_timer.T3510.id,
+				 nas->fgmm_timer.T3510.sec);
+  }
 }
 
 void generateServiceRequest(as_nas_info_t *initialNasMsg, nr_ue_nas_t *nas)
@@ -1149,7 +1249,7 @@ void generateServiceRequest(as_nas_info_t *initialNasMsg, nr_ue_nas_t *nas)
 }
 
 /** @brief Build Identity Response according to requested identity type (8.2.22 of 3GPP TS 24.501) */
-static void generateIdentityResponse(const nr_ue_nas_t *nas, as_nas_info_t *initialNasMsg, uint8_t identitytype)
+static void generateIdentityResponse(nr_ue_nas_t *nas, as_nas_info_t *initialNasMsg, uint8_t identitytype)
 {
   int size = sizeof(fgmm_msg_header_t);
   fgmm_nas_message_plain_t plain = {0};
@@ -1230,6 +1330,7 @@ static void generateAuthenticationResp(nr_ue_nas_t *nas, as_nas_info_t *initialN
   initialNasMsg->nas_data = malloc_or_fail(size * sizeof(*initialNasMsg->nas_data));
 
   initialNasMsg->length = mm_msg_encode(&plain, initialNasMsg->nas_data, size);
+
   // Free res value after encode
   free(res.value);
 }
@@ -1281,9 +1382,22 @@ static void handle_fgmm_authentication_request(nr_ue_nas_t *nas, as_nas_info_t *
     of the 5G security contexts stored in the UE, send failure message */
     LOG_E(NAS, "Invalid NAS Key Set Identifier: send Authentication Failure\n");
     generateAuthenticationFailure(initialNasMsg, ngKSI_already_in_use);
+
+	/* Stop T3510 */
+	nas->fgmm_timer.T3510.id = nas_timer_stop(nas->fgmm_timer.T3510.id);
+
+	/* Stop timer T3516 */
+	nas->fgmm_timer.T3516.id = nas_timer_stop(nas->fgmm_timer.T3516.id);
+
+	/* Stop timer T3517 */
+	nas->fgmm_timer.T3517.id = nas_timer_stop(nas->fgmm_timer.T3517.id);
+
     return;
   }
   generateAuthenticationResp(nas, initialNasMsg, buffer->buf);
+
+  /* Start retransmission timer T3516 */
+  nas->fgmm_timer.T3516.id = nas_timer_start_ext(nas->UE_id, nas->fgmm_timer.T3516.sec, fgmm_expiry_t3516_handler, nas);
 }
 
 /** @brief Handle authentication not accepted by the network
@@ -1309,6 +1423,17 @@ static void handle_authentication_reject(nr_ue_nas_t *nas, uint8_t *pdu, int pdu
     LOG_W(NAS, "NAS Authentication Reject contains an EAP message: handling is not implemented\n");
     log_hex_buffer("EAP-Failure", msg.eap_msg.buf, msg.eap_msg.len);
   }
+
+  /* Reset 5G MM procedure handler */
+  nr_registration_lowerlayer_initialize(nas->lowerlayer_data, NULL, NULL, NULL, NULL);
+
+  /* Stop T3510 */
+  nas->fgmm_timer.T3510.id = nas_timer_stop(nas->fgmm_timer.T3510.id);
+
+  /* Stop timer T3516 */
+  nas->fgmm_timer.T3516.id = nas_timer_stop(nas->fgmm_timer.T3516.id);
+
+  nas->fgs_status = FGS_U3_ROAMING_NOT_ALLOWED;
 
   nas->fiveGMM_state = FGS_DEREGISTERED;
 }
@@ -1551,6 +1676,10 @@ static void handle_security_mode_command(nr_ue_nas_t *nas, as_nas_info_t *initia
   }
 
   nas_itti_kgnb_refresh_req(nas->UE_id, nas->security.kgnb);
+
+  /* Stop timer T3516 */
+  nas->fgmm_timer.T3516.id = nas_timer_stop(nas->fgmm_timer.T3516.id);
+
   generateSecurityModeComplete(nas, initialNasMsg);
 }
 
@@ -1769,6 +1898,11 @@ static void handle_pdu_session_accept(const nr_ue_nas_t *nas, uint8_t *pdu_buffe
   } else {
     LOG_W(NAS, "Unhandled PDU session type %d, ignoring PDU session ID %d\n", msg.pdu_type, sm_header.pdu_session_id);
   }
+
+LOG_I(NAS, "5G MM-PROC	- Timer id [%d] T3510 remaining %ld seconds\n",
+	       nas->fgmm_timer.T3510.id,
+		   nas_timer_get_remaining_sec(nas->fgmm_timer.T3510.id));
+
 }
 
 /**
@@ -1986,6 +2120,12 @@ static void send_nas_detach_req(nr_ue_nas_t *nas, bool wait_release)
   itti_send_msg_to_task(TASK_RRC_NRUE, nas->UE_id, msg);
 }
 
+static void send_nas_abort_req(nr_ue_nas_t *nas)
+{
+  MessageDef *msg = itti_alloc_new_message(TASK_NAS_NRUE, nas->UE_id, NAS_ABORT_REQ);
+  itti_send_msg_to_task(TASK_RRC_NRUE, nas->UE_id, msg);
+}
+
 static void send_nas_5gmm_ind(instance_t instance, const Guti5GSMobileIdentity_t *guti)
 {
   MessageDef *msg = itti_alloc_new_message(TASK_NAS_NRUE, 0, NAS_5GMM_IND);
@@ -2044,6 +2184,446 @@ static void process_guti(Guti5GSMobileIdentity_t *guti, nr_ue_nas_t *nas)
   *nas->guti = *guti;
 }
 
+
+/*
+ * --------------------------------------------------------------------------
+ *              Timer handlers
+ * --------------------------------------------------------------------------
+ */
+
+/****************************************************************************
+ **                                                                        **
+ ** Name:    fgmm_detach_t3502_handler()                               **
+ **                                                                        **
+ ** Description: T3502 timeout handler                                     **
+ **                                                                        **
+ **              3GPP TS 24.301, section 5.5.2.2.4 case c                  **
+ **      On the first four expiries of the timer, the UE shall re- **
+ **      transmit the DETACH REQUEST message and shall reset and   **
+ **      restart timer fgmm_timer->T3502. On the fifth expiry of timer T3502,  **
+ **      the deregistration procedure shall be aborted.                    **
+ **                                                                        **
+ ** Inputs:  args:      handler parameters                         **
+ **                                                                        **
+ ** Outputs:     None                                                      **
+ **      Return:    None                                       **
+ **      Others:    None                                       **
+ **                                                                        **
+ ***************************************************************************/
+void *fgmm_expiry_t3502_handler(void *args)
+{
+  LOG_FUNC_IN;
+
+  nr_ue_nas_t *nas = args;
+
+  LOG_TRACE(WARNING, "5G MM-PROC	- T3502 timer expired");
+
+  /* Stop T3502 timer */
+  nas->fgmm_timer.T3502.id = nas_timer_stop(nas->fgmm_timer.T3502.id);
+  nas->fiveGMM_state = FGS_DEREGISTERED_ATTEMPTING_REGISTRATION;
+
+  nas->fgmm_reg_data.attempt_count = 0;
+
+  nas->fiveGMM_state = FGS_REGISTERED_INITIATED;
+
+  as_nas_info_t initialNasMsg = {0};
+  generateRegistrationRequest(&initialNasMsg, nas, false);
+  if (!initialNasMsg.nas_data) {
+  	//TODO error handling
+	LOG_E(NAS, "Failed to initiate initial Registration Request)\n");
+	LOG_FUNC_RETURN(NULL);
+  }
+  send_nas_uplink_data_req(nas, &initialNasMsg);
+
+  LOG_FUNC_RETURN(NULL);
+}
+
+
+
+/****************************************************************************
+ **                                                                        **
+ ** Name:    fgmm_expiry_t3510_handler()                               **
+ **                                                                        **
+ ** Description: T3510 timeout handler                                     **
+ **                                                                        **
+ **              3GPP TS 24.301, section 5.5.2.2.4 case c                  **
+ **      On the first four expiries of the timer, the UE shall re- **
+ **      transmit the REGISTRATION REQUEST message and shall reset and   **
+ **      restart timer fgmm_timer->T3510. On the fifth expiry of timer T3510,  **
+ **      the deregistration procedure shall be aborted.                    **
+ **                                                                        **
+ ** Inputs:  args:      handler parameters                         **
+ **                                                                        **
+ ** Outputs:     None                                                      **
+ **      Return:    None                                       **
+ **      Others:    None                                       **
+ **                                                                        **
+ ***************************************************************************/
+void *fgmm_expiry_t3510_handler(void *args)
+{
+  LOG_FUNC_IN;
+
+  nr_ue_nas_t *nas=args;
+
+  LOG_TRACE(WARNING, "5G MM-PROC	- T3510 timer expired");
+
+  /* Reset 5G MM procedure handler */
+  nr_registration_lowerlayer_initialize(nas->lowerlayer_data, NULL, NULL, NULL, NULL);
+
+  /*Notify NAS via NR_NAS_CONN_RELEASE_IND to proceed with abnormal handling c,d,e*/
+  send_nas_abort_req(nas);
+
+  LOG_FUNC_RETURN(NULL);
+}
+
+
+/****************************************************************************
+ **                                                                        **
+ ** Name:    fgmm_expiry_t3511_handler()                               **
+ **                                                                        **
+ ** Description: T3511 timeout handler                                     **
+ **                                                                        **
+ **              3GPP TS 24.301, section 5.5.1.2.6                         **
+ **      Upon T3511 timer expiration, the registration procedure shall   **
+ **      be restarted, if still required by 5GSM sublayer.          **
+ **                                                                        **
+ ** Inputs:  args:      handler parameters                         **
+ **      Others:    None                                       **
+ **                                                                        **
+ ** Outputs:     None                                                      **
+ **      Return:    None                                       **
+ **      Others:    T3511                                      **
+ **                                                                        **
+ ***************************************************************************/
+void *fgmm_expiry_t3511_handler(void *args)
+{
+  LOG_FUNC_IN;
+
+  nr_ue_nas_t *nas=args;
+
+  LOG_TRACE(WARNING, "5G MM-PROC  - T3511 timer expired");
+
+  /* Stop T3511 timer */
+  nas->fgmm_timer.T3511.id = nas_timer_stop(nas->fgmm_timer.T3511.id);
+
+  if (nas->fgmm_reg_data.attempt_count <= FGS_REGISTRATION_COUNTER_MAX) {
+	
+	nas->fiveGMM_state = FGS_REGISTERED_INITIATED;
+
+	// NAS is security protected if has valid security contexts
+	as_nas_info_t retxNasMsg = {0};
+	bool security_protected = nas->security_container && nas->security_container->integrity_context;
+	generateRegistrationRequest(&retxNasMsg, nas, security_protected);
+	if (!retxNasMsg.nas_data) {
+	  //TODO error handling
+	  LOG_E(NAS, "Failed to Resend Registration Request)\n");
+	  LOG_FUNC_RETURN(NULL);
+	}
+	LOG_I(NAS, "Resend Registration Request\n");
+	send_nas_uplink_data_req(nas, &retxNasMsg);
+  }
+
+  LOG_FUNC_RETURN(NULL);
+}
+
+/****************************************************************************
+ **                                                                        **
+ ** Name:    fgmm_expiry_t3516_handler()                           **
+ **                                                                        **
+ ** Description: T3516 timeout handler                                     **
+ **      Upon T3516 timer expiration, the RAND and RES values sto- **
+ **      red in the ME shall be deleted.                           **
+ **                                                                        **
+ **              3GPP TS 24.501, section 5.4.2.3                           **
+ **                                                                        **
+ ** Inputs:  args:      handler parameters                         **
+ **      Others:    None                                       **
+ **                                                                        **
+ ** Outputs:     None                                                      **
+ **      Return:    None                                       **
+ **      Others:    T3516                                      **
+ **                                                                        **
+ ***************************************************************************/
+void *fgmm_expiry_t3516_handler(void *args)
+{
+  LOG_FUNC_IN;
+  nr_ue_nas_t *nas=args;
+
+  LOG_TRACE(WARNING, "5G MM-PROC  - T3516 timer expired");
+
+  /* Delete previouly stored RAND and RES authentication data */
+  (void) fgmm_proc_authentication_delete(nas);
+
+  LOG_FUNC_RETURN (NULL);
+}
+
+/****************************************************************************
+ **                                                                        **
+ ** Name:    fgmm_expiry_t3517_handler()                              **
+ **                                                                        **
+ ** Description: T3517 timeout handler                                     **
+ **                                                                        **
+ **              3GPP TS 24.501, section 5.6.1.6 case c                    **
+ **                                                                        **
+ ** Inputs:  args:      handler parameters                         **
+ **      Others:    None                                       **
+ **                                                                        **
+ ** Outputs:     None                                                      **
+ **      Return:    None                                       **
+ **      Others:    None                                       **
+ **                                                                        **
+ ***************************************************************************/
+void *fgmm_expiry_t3517_handler(void *args)
+{
+  LOG_FUNC_IN;
+  nr_ue_nas_t *nas=args;
+
+  LOG_TRACE(WARNING, "5G MM-PROC  - T3517 timer expired");
+
+  nas->fiveGMM_state = FGS_REGISTERED;
+
+  /* Stop timer T3517 */
+  nas->fgmm_timer.T3517.id = nas_timer_stop(nas->fgmm_timer.T3517.id);
+
+  //TODO Abort service request
+
+  LOG_FUNC_RETURN(NULL);
+}
+
+
+/****************************************************************************
+ **                                                                        **
+ ** Name:    fgmm_expiry_t3519_handler()                              **
+ **                                                                        **
+ ** Description: T3519 timeout handler                                     **
+ **                                                                        **
+ **              3GPP TS 24.501, section 5.6.1.6 case c                    **
+ **                                                                        **
+ ** Inputs:  args:      handler parameters                         **
+ **      Others:    None                                       **
+ **                                                                        **
+ ** Outputs:     None                                                      **
+ **      Return:    None                                       **
+ **      Others:    None                                       **
+ **                                                                        **
+ ***************************************************************************/
+void *fgmm_expiry_t3519_handler(void *args)
+{
+  LOG_FUNC_IN;
+  args = NULL;
+
+  LOG_TRACE(WARNING, "5G MM-PROC  - T3519 timer expired");
+
+  //Explicit suci delete not required as it is stateless and re-filled in case no guti
+
+  LOG_FUNC_RETURN(NULL);
+}
+
+/*
+ * --------------------------------------------------------------------------
+ *              Abnormal cases in the UE
+ * --------------------------------------------------------------------------
+ */
+
+/****************************************************************************
+ **                                                                        **
+ ** Name:    _fgmm_registration_abnormal_cases_cde()                          **
+ **                                                                        **
+ ** Description: Performs the abnormal case attach procedure.              **
+ **                                                                        **
+ **      3GPP TS 24.501, section 5.5.1.2.6, cases c, d and e       **
+ **      The Timer T3510 shall be stopped if still running, the    **
+ **      registration attempt counter shall be incremented and the UE    **
+ **      shall proceed depending on whether the registration attempt     **
+ **      counter reached its maximum value or not.                 **
+ **                                                                        **
+ ** Inputs:  None                                                      **
+ **      Others:    None                                       **
+ **                                                                        **
+ ** Outputs:   
+ **      Return:    None                                       **
+ **                                                                        **
+ ***************************************************************************/
+static void _fgmm_registration_abnormal_cases_cde(nr_ue_nas_t *user)
+{
+  LOG_FUNC_IN;
+
+  nr_ue_nas_t *nas = user;
+  LOG_TRACE(WARNING, "5G MM-PROC  - Abnormal case, attempt counter = %d",
+            nas->fgmm_reg_data.attempt_count);
+
+  nas->fgmm_timer.T3510.id = nas_timer_stop(nas->fgmm_timer.T3510.id);
+  if(nas->fgmm_reg_data.fgsregistrationtype == EMERGENCY_REGISTRATION) {  	
+	/* Locally release the NAS signalling connection */
+  	//TODO
+  } else {
+    if (nas->fgmm_reg_data.attempt_count < FGS_REGISTRATION_COUNTER_MAX) {
+      /* Increment the attach attempt counter */
+      nas->fgmm_reg_data.attempt_count += 1;
+      /* Restart T3511 timer */
+	  nas->fgmm_timer.T3511.id = nas_timer_stop(nas->fgmm_timer.T3511.id);
+      nas->fgmm_timer.T3511.id = nas_timer_start_ext(nas->UE_id, nas->fgmm_timer.T3511.sec, fgmm_expiry_t3511_handler, user);
+
+	  LOG_TRACE(INFO, "5G MM-PROC  - Timer T3511 started and expires in %ld seconds",
+                nas->fgmm_timer.T3511.sec);
+	} else {
+
+      /* Delete store guti */
+	  delete_guti(nas->guti);
+
+      /* Delete store ksi */
+	  delete_ksi(nas->ksi);
+
+      /* TODO Delete TAI list, equivalent plmn */
+
+      /* Start T3502 timer */
+      nas->fgmm_timer.T3502.id = nas_timer_start_ext(nas->UE_id, nas->fgmm_timer.T3502.sec, fgmm_expiry_t3502_handler, user);
+
+	  LOG_TRACE(INFO, "5G MM-PROC  - Timer T3502 started and expires in %ld seconds",
+                nas->fgmm_timer.T3502.sec);
+
+	  nas->fgs_status = FGS_U2_NOT_UPDATED;
+	  //TODO Single Registration mode
+    }
+
+	/* Set NAS 5GMM state */
+	nas->fiveGMM_state = FGS_DEREGISTERED_ATTEMPTING_REGISTRATION;
+  }
+
+  LOG_FUNC_OUT;
+}
+
+
+/*
+ * --------------------------------------------------------------------------
+ *              5G MM procedure handlers
+ * --------------------------------------------------------------------------
+ */
+/****************************************************************************
+ **                                                                        **
+ ** Name:    fgmm_proc_lowerlayer_initialize()                          **
+ **                                                                        **
+ ** Description: Initialize 5G MM procedure handler                          **
+ **                                                                        **
+ ** Inputs:  success:   FGMM procedure executed when data have been **
+ **             successfully delivered by lower layers     **
+ **      failure:   FGMM procedure executed upon transmission   **
+ **             failure reported by lower layers           **
+ **      release:   FGMM procedure executed when lower layers   **
+ **             report that NAS signalling connection has  **
+ **             been released                              **
+ **      args:      FGMM procedure argument parameters          **
+ **      Others:    None                                       **
+ **                                                                        **
+ ** Outputs:     None                                                      **
+ **      Return:    RETURNok, RETURNerror                      **
+ **      Others:    _lowerlayer_data                           **
+ **                                                                        **
+ ***************************************************************************/
+int nr_registration_lowerlayer_initialize(nr_registration_lowerlayer_data_t *lowerlayer_data, 
+	                               nr_ll_success_cb_t success,
+                                   nr_ll_failure_cb_t failure,
+                                   nr_ll_release_cb_t release,
+                                   void *args)
+{
+  LOG_FUNC_IN;
+
+  lowerlayer_data->success = success;
+  lowerlayer_data->failure = failure;
+  lowerlayer_data->release = release;
+  lowerlayer_data->args = args;
+
+  LOG_FUNC_RETURN (RETURNok);
+}
+
+/****************************************************************************
+ **                                                                        **
+ ** Name:    nr_proc_registration_request()                                 **
+ **                                                                        **
+ ** Description: Performs the registration procedure upon receipt of indication  **
+ **      from lower layers that Registration Request message has been    **
+ **      successfully delivered to the network.                    **
+ **                                                                        **
+ ** Inputs:  args:      Not used                                   **
+ **      Others:    None                                       **
+ **                                                                        **
+ ** Outputs:     None                                                      **
+ **      Return:    RETURNok, RETURNerror                      **
+ **      Others:    None                                       **
+ **                                                                        **
+ ***************************************************************************/
+int nr_proc_registration_request(void *args)
+{
+  LOG_FUNC_IN;
+  //nr_ue_nas_t *user=args;
+  args = NULL;
+  int rc = 0;
+
+  LOG_FUNC_RETURN(rc);
+}
+
+int nr_proc_registration_failure(bool is_initial, void *args)  
+{
+  nr_ue_nas_t *nas = args;
+  /* Reset 5G MM procedure handler */
+  nr_registration_lowerlayer_initialize(nas->lowerlayer_data, NULL, NULL, NULL, NULL);
+  // stop T3510 (registration timer) if running
+  //nas->fgmm_timer.T3510.id = nas_timer_stop(nas->fgmm_timer.T3510.id);
+  // increment attempt counter, decide retry vs abort per �5.5.1.2.7
+  nas->fgmm_reg_data.attempt_count++;
+  if (nas->fgmm_reg_data.attempt_count>= FGS_REGISTRATION_COUNTER_MAX) {
+    // start T3502
+    nas->fgmm_timer.T3502.id = nas_timer_start_ext(nas->UE_id, nas->fgmm_timer.T3502.sec, fgmm_expiry_t3502_handler, nas);
+  } else {
+    // start T3511, retry when it expires
+  }
+  return RETURNok;
+}
+
+/****************************************************************************
+ **                                                                        **
+ ** Name:    nr_proc_registration_release()                                 **
+ **                                                                        **
+ ** Description: Performs the registration procedure abnormal case upon receipt  **
+ **      of NAS signalling connection release indication.          **
+ **                                                                        **
+ **              3GPP TS 25.301, section 5.5.1.2.6, case b                 **
+ **      The registration procedure shall be aborted and the UE shall    **
+ **      execute abnormal case attach procedure.                   **
+ **                                                                        **
+ ** Inputs:  args:      Not used                                   **
+ **      Others:    None                                       **
+ **                                                                        **
+ ** Outputs:     None                                                      **
+ **      Return:    RETURNok, RETURNerror                      **
+ **      Others:    None                                       **
+ **                                                                        **
+ ***************************************************************************/
+int nr_proc_registration_release(void *args)
+{
+  LOG_FUNC_IN;
+  nr_ue_nas_t *user=args;
+  int rc = 0;
+
+  LOG_TRACE(WARNING, "5G MM-PROC  - NAS signalling connection released");
+
+  /* Execute abnormal case registration procedure */
+  _fgmm_registration_abnormal_cases_cde(user);
+
+  LOG_FUNC_RETURN(rc);
+}
+
+int nr_registration_lowerlayer_failure(nr_registration_lowerlayer_data_t *lowerlayer_data, bool is_initial)  
+{
+  nr_ll_failure_cb_t cb = lowerlayer_data->failure;
+  int rc = RETURNok;
+  if (cb) {
+    rc = (*cb)(is_initial, lowerlayer_data->args);
+    lowerlayer_data->failure = NULL;
+  }
+  return rc;
+}
+
 static void handle_registration_accept(nr_ue_nas_t *nas, const uint8_t *pdu_buffer, uint32_t msg_length)
 {
   registration_accept_msg msg = {0};
@@ -2091,12 +2671,18 @@ static void handle_registration_accept(nr_ue_nas_t *nas, const uint8_t *pdu_buff
   if(nas->guti)
     send_nas_5gmm_ind(nas->UE_id, nas->guti);
 
-  as_nas_info_t initialNasMsg = {0};
-  generateRegistrationComplete(nas, &initialNasMsg, NULL);
-  if (initialNasMsg.length > 0) {
-    send_nas_uplink_data_req(nas, &initialNasMsg);
-    LOG_I(NAS, "Send NAS_UPLINK_DATA_REQ message(RegistrationComplete)\n");
+  if (msg.guti) {
+  	  as_nas_info_t initialNasMsg = {0};
+      generateRegistrationComplete(nas, &initialNasMsg, NULL);
+      if (initialNasMsg.length > 0) {
+        send_nas_uplink_data_req(nas, &initialNasMsg);
+        LOG_I(NAS, "Send NAS_UPLINK_DATA_REQ message(RegistrationComplete)\n");
+      }
+
+      /* Stop timer T3519 */
+      nas->fgmm_timer.T3519.id = nas_timer_stop(nas->fgmm_timer.T3519.id);
   }
+
   if (nas->uicc->n_pdu_sessions == 0)
     LOG_W(SIM, "no PDU sessions to request configured\n");
   for (const pdu_session_config_t *pdu = nas->uicc->pdu_sessions; pdu < nas->uicc->pdu_sessions + nas->uicc->n_pdu_sessions; ++pdu) {
@@ -2111,6 +2697,22 @@ static void handle_registration_accept(nr_ue_nas_t *nas, const uint8_t *pdu_buff
       request_pdusession(nas, pdu);
     }
   }
+  nas->fgmm_reg_data.attempt_count = 0;
+
+  nas->fiveGMM_state = FGS_REGISTERED;
+
+  nas->fgs_status = FGS_U1_UPDATED;
+
+  if (nas->fgmm_timer.T3510.id != NAS_TIMER_INACTIVE_ID) {
+    LOG_I(NAS, "5G MM-PROC  - Stop timer T3510 (%d)\n", nas->fgmm_timer.T3510.id);
+    nas->fgmm_timer.T3510.id = nas_timer_stop(nas->fgmm_timer.T3510.id);
+  }
+
+  if (nas->fgmm_timer.T3516.id != NAS_TIMER_INACTIVE_ID) {
+    LOG_I(NAS, "5G MM-PROC  - Stop timer T3516 (%d)\n", nas->fgmm_timer.T3516.id);
+    nas->fgmm_timer.T3516.id = nas_timer_stop(nas->fgmm_timer.T3516.id);
+  }
+
   // Free local message after processing
   free_fgmm_registration_accept(&msg);
 }
@@ -2152,6 +2754,9 @@ static void handle_service_accept(nr_ue_nas_t *nas, const byte_array_t *buffer)
   decode_fgs_service_accept(&msg, buffer);
   // Extract timer t3448 in seconds (optional IE)
   nas->t3448 = process_gprs_timer(msg.t3448);
+  /* Stop timer T3517 */
+  nas->fgmm_timer.T3517.id = nas_timer_stop(nas->fgmm_timer.T3517.id);
+
   // Extract possible reactivation errors
   for (int i = 0; i < msg.num_errors; i++)
     LOG_E(NAS,
@@ -2171,7 +2776,112 @@ static void handle_service_reject(nr_ue_nas_t *nas, const byte_array_t *buffer)
   nas->t3448 = process_gprs_timer(msg.t3448);
   // Extract timer t3446 in seconds (optional IE)
   nas->t3446 = process_gprs_timer(msg.t3446);
+  /* Stop timer T3516 */
+  nas->fgmm_timer.T3516.id = nas_timer_stop(nas->fgmm_timer.T3516.id);
+  /* Stop timer T3517 */
+  nas->fgmm_timer.T3517.id = nas_timer_stop(nas->fgmm_timer.T3517.id);
+
   LOG_E(NAS, "Received NAS Service Reject message with cause %s\n", fgmm_cause_s[msg.cause].text);
+}
+
+void process_fgs_registration_reject_cause(nr_ue_nas_t *nas, fgs_registration_reject_msg_t *msg)
+{
+	switch (msg->cause) {
+	  case Illegal_UE:
+		/* Handle Illegal UE */
+
+		nas->fgs_status = FGS_U3_ROAMING_NOT_ALLOWED;
+		break;
+
+	  case PEI_not_accepted:
+		/* Handle PEI not accepted */
+		break;
+
+	  case Illegal_ME:
+		/* Handle Illegal ME */
+
+		nas->fgs_status = FGS_U3_ROAMING_NOT_ALLOWED;
+		break;
+
+	  case SGS_services_not_allowed:
+		/* Handle SGS services not allowed */
+
+		nas->fgs_status = FGS_U3_ROAMING_NOT_ALLOWED;
+		break;
+
+	  case UE_identity_cannot_be_derived_by_the_network:
+		/* Handle UE identity cannot be derived by the network */
+		
+		nas->fgmm_reg_data.attempt_count = 0;
+		break;
+
+	  case Implicitly_de_registered:
+		/* Handle implicitly de-registered */
+		
+		nas->fgmm_reg_data.attempt_count = 0;
+		break;
+
+	  case PLMN_not_allowed:
+		/* Handle PLMN not allowed */
+
+		nas->fgs_status = FGS_U3_ROAMING_NOT_ALLOWED;
+
+		nas->fgmm_reg_data.attempt_count = 0;
+		break;
+
+	  case Tracking_area_not_allowed:
+		/* Handle tracking area not allowed */
+
+		nas->fgs_status = FGS_U3_ROAMING_NOT_ALLOWED;
+
+		nas->fgmm_reg_data.attempt_count = 0;
+		break;
+
+	  case Roaming_not_allowed_in_this_tracking_area:
+		/* Handle roaming not allowed in this tracking area */
+
+		nas->fgs_status = FGS_U3_ROAMING_NOT_ALLOWED;
+
+		nas->fgmm_reg_data.attempt_count = 0;
+		break;
+
+	  case No_suitable_cells_in_tracking_area:
+		/* Handle no suitable cells in tracking area */
+
+		nas->fgs_status = FGS_U3_ROAMING_NOT_ALLOWED;
+		break;
+
+	  case Congestion:
+		/* Handle congestion */
+
+        if (nas->fgmm_reg_data.fgsregistrationtype != EMERGENCY_REGISTRATION) {
+			//TODO Abort service request
+		  nas->fiveGMM_state = FGS_REGISTERED;
+		  /* Stop timer T3517 */
+		  nas->fgmm_timer.T3517.id = nas_timer_stop(nas->fgmm_timer.T3517.id);
+	    }
+
+		nas->fgs_status = FGS_U2_NOT_UPDATED;
+		break;
+
+	  case N1_mode_not_allowed:
+		/* Handle N1 mode not allowed */
+
+		nas->fgs_status = FGS_U3_ROAMING_NOT_ALLOWED;
+
+		nas->fgmm_reg_data.attempt_count = 0;
+		break;
+
+	  case Serving_network_not_authorized:
+		/* Handle serving network not authorized */
+
+		nas->fgs_status = FGS_U3_ROAMING_NOT_ALLOWED;
+		break;
+
+	  default:
+		/* Unknown / unsupported cause */
+		break;
+	}
 }
 
 /** @brief Handle Registration Reject (8.2.7 / 5.5.1.2.5 of 3GPP TS 24.501)
@@ -2226,9 +2936,18 @@ static void handle_registration_reject(nr_ue_nas_t *nas, const byte_array_t *buf
   }
 
   LOG_E(NAS, "Received Registration Reject cause: %s\n", print_info(msg.cause, fgmm_cause_s, sizeofArray(fgmm_cause_s)));
+
+  process_fgs_registration_reject_cause(nas,&msg);
+
   free_fgs_registration_reject(&msg);
   nas->fiveGMM_state = FGS_DEREGISTERED;
   nas->termination_procedure = true;
+  /* Stop T3510 */
+  nas->fgmm_timer.T3510.id = nas_timer_stop(nas->fgmm_timer.T3510.id);
+
+  /* Stop timer T3516 */
+  nas->fgmm_timer.T3516.id = nas_timer_stop(nas->fgmm_timer.T3516.id);
+
   send_nas_detach_req(nas, false);
 }
 
@@ -2248,6 +2967,10 @@ void *nas_nrue(void *args_p)
         break;
 
       case TERMINATE_MESSAGE:
+	  	if (nas->lowerlayer_data) {
+			free(nas->lowerlayer_data);
+			nas->lowerlayer_data = NULL;
+		}
         itti_exit_task();
         break;
 
@@ -2294,7 +3017,8 @@ void *nas_nrue(void *args_p)
          * This implementation currently enforces:
          *  1. UE has GUTI
          *  2. UE is 5GMM-REGISTERED
-         *  3. UE is 5GMM-IDLE
+         *  3. UE is 5GMM-IDLE         
+         *  4. UE is 5U1 UPDATED
          *
          * TODO (future work):
          *  - Implement T3346 and stop it here if running.
@@ -2329,6 +3053,18 @@ void *nas_nrue(void *args_p)
           break;
         }
 
+        if (nas->fgs_status!= FGS_U1_UPDATED) {
+			//TAI list validation TODO
+          LOG_W(NAS,
+                "[UE %ld] Paging received but UE not in 5U1 UPDATED (status=%d), dropping Service Request\n",
+                nas->UE_id,
+			    nas->fgs_status);
+          break;
+        }
+
+		/* Stop timer T3516 */
+		nas->fgmm_timer.T3516.id = nas_timer_stop(nas->fgmm_timer.T3516.id);
+
         as_nas_info_t initialNasMsg = {0};
         generateServiceRequest(&initialNasMsg, nas);
         if (initialNasMsg.length <= 0) {
@@ -2337,6 +3073,10 @@ void *nas_nrue(void *args_p)
         }
         /* TS 24.501 §5.6.1.2: send SERVICE REQUEST, enter 5GMM-SERVICE-REQUEST-INITIATED (§5.1.3.2.1.2.6) */
         nas->fiveGMM_state = FGS_SERVICE_REQUEST_INITIATED;
+
+		/* Start T3517 timer */
+		nas->fgmm_timer.T3517.id = nas_timer_start_ext(nas->UE_id, nas->fgmm_timer.T3517.sec, fgmm_expiry_t3517_handler, nas);
+
         send_nas_initial_ul_transfer_req(nas, &initialNasMsg);
         LOG_I(NAS,
               "[UE %ld] Paging: Service Request (%u B) sent to RRC (NAS_INITIAL_UL_TRANSFER_REQ)\n",
@@ -2374,41 +3114,57 @@ void *nas_nrue(void *args_p)
               NAS_CONN_ESTABLI_CNF(msg_p).errCode,
               NAS_CONN_ESTABLI_CNF(msg_p).nasMsg.length);
 
-        byte_array_t ba = {.buf = NAS_CONN_ESTABLI_CNF(msg_p).nasMsg.nas_data, .len = NAS_CONN_ESTABLI_CNF(msg_p).nasMsg.length};
-        security_state_t security_state = nas_security_rx_process(nas, ba);
-        if (security_state > NAS_SECURITY_INTEGRITY_PASSED) {
-          LOG_E(NAS, "NAS integrity failed, discard incoming message: security state is %s\n", security_state_info[security_state].text);
-          break;
+        if ((NAS_CONN_ESTABLI_CNF (msg_p).errCode == AS_SUCCESS)
+            || (NAS_CONN_ESTABLI_CNF (msg_p).errCode == AS_TERMINATED_NAS)) {
+			byte_array_t ba = {.buf = NAS_CONN_ESTABLI_CNF(msg_p).nasMsg.nas_data, .len = NAS_CONN_ESTABLI_CNF(msg_p).nasMsg.length};
+			security_state_t security_state = nas_security_rx_process(nas, ba);
+			if (security_state > NAS_SECURITY_INTEGRITY_PASSED) {
+			  LOG_E(NAS, "NAS integrity failed, discard incoming message: security state is %s\n", security_state_info[security_state].text);
+			  break;
+			}
+			
+			fgs_nas_msg_t msg_type = get_msg_type(ba.buf, ba.len);
+			LOG_D(NAS,
+				  "[UE %ld] NAS_CONN_ESTABLI_CNF decoded NAS msg_type=%s (%d)\n",
+				  nas->UE_id,
+				  print_info(msg_type, message_text_info, sizeofArray(message_text_info)),
+				  msg_type);
+			if (msg_type == FGS_REGISTRATION_ACCEPT) {
+			  handle_registration_accept(nas, ba.buf, ba.len);
+			} else if (msg_type == FGS_PDU_SESSION_ESTABLISHMENT_ACC) {
+			  handle_pdu_session_accept(nas, ba.buf, ba.len, nas->UE_id);
+			} else if (msg_type == FGS_SERVICE_ACCEPT) {
+			  handle_service_accept(nas, &ba);
+			}
+			
+			// Free NAS buffer memory after use (coming from RRC)
+			free_byte_array(ba);
         }
 
-        fgs_nas_msg_t msg_type = get_msg_type(ba.buf, ba.len);
-        LOG_D(NAS,
-              "[UE %ld] NAS_CONN_ESTABLI_CNF decoded NAS msg_type=%s (%d)\n",
-              nas->UE_id,
-              print_info(msg_type, message_text_info, sizeofArray(message_text_info)),
-              msg_type);
-        if (msg_type == FGS_REGISTRATION_ACCEPT) {
-          handle_registration_accept(nas, ba.buf, ba.len);
-        } else if (msg_type == FGS_PDU_SESSION_ESTABLISHMENT_ACC) {
-          handle_pdu_session_accept(nas, ba.buf, ba.len, nas->UE_id);
-        } else if (msg_type == FGS_SERVICE_ACCEPT) {
-          handle_service_accept(nas, &ba);
-        }
-
-        // Free NAS buffer memory after use (coming from RRC)
-        free_byte_array(ba);
         break;
       }
 
       case NR_NAS_CONN_RELEASE_IND: {
-        LOG_I(NAS, "[UE %ld] Received %s: cause %s\n",
-              nas->UE_id, ITTI_MSG_NAME (msg_p), nr_release_cause_desc[NR_NAS_CONN_RELEASE_IND (msg_p).cause]);
-        /* In N1 mode, upon indication from lower layers that the access stratum connection has been released,
+        LOG_I(NAS, "[UE %ld] Received %s: cause %s in 5GMM state: %d\n",
+              nas->UE_id, ITTI_MSG_NAME (msg_p), 
+              nr_release_cause_desc[NR_NAS_CONN_RELEASE_IND (msg_p).cause],
+              nas->fiveGMM_state);
+
+        nas->fiveGMM_mode = FGS_IDLE;
+
+		/* In N1 mode, upon indication from lower layers that the access stratum connection has been released,
            the UE shall enter 5GMM-IDLE mode and consider the N1 NAS signalling connection released (TS 24.501 §5.3.1.3).
            If SR incomplete (5GMM-SERVICE-REQUEST-INITIATED) §5.6.1.7 l): abort SR, enter 5GMM-REGISTERED (TODO: stop T3517). */
         if (nas->fiveGMM_state == FGS_SERVICE_REQUEST_INITIATED)
           nas->fiveGMM_state = FGS_REGISTERED;
-        nas->fiveGMM_mode = FGS_IDLE;
+		else if (nas->fiveGMM_state == FGS_REGISTERED_INITIATED) {
+    		_fgmm_registration_abnormal_cases_cde(nas);
+			break;
+		}
+
+		/* Stop timer T3516 */
+		nas->fgmm_timer.T3516.id = nas_timer_stop(nas->fgmm_timer.T3516.id);
+
         // TODO handle connection release
         if (nas->termination_procedure) {
           /* the following is not clean, but probably necessary: we need to give
@@ -2416,8 +3172,11 @@ void *nas_nrue(void *args_p)
            * message. Hence, we just below wait some time, before finally
            * unblocking the nr-uesoftmodem, which will terminate the process. */
           usleep(100000);
+		  nas->termination_procedure = false;		  
+          nas->fiveGMM_state = FGS_DEREGISTERED;
           itti_wait_tasks_unblock(); /* will unblock ITTI to stop nr-uesoftmodem */
         }
+
         break;
       }
       case NAS_UPLINK_DATA_CNF:
@@ -2487,11 +3246,15 @@ void *nas_nrue(void *args_p)
             handle_registration_accept(nas, pdu_buffer, pdu_length);
             break;
           case FGS_DEREGISTRATION_ACCEPT_UE_ORIGINATING:
-            LOG_I(NAS, "received deregistration accept\n");
+            LOG_I(NAS, "Received deregistration accept\n");
             /* Set NAS 5GMM state */
             nas->fiveGMM_state = FGS_DEREGISTERED;
+
+			/* Stop timer T3516 */
+            nas->fgmm_timer.T3516.id = nas_timer_stop(nas->fgmm_timer.T3516.id);
             break;
-          case FGS_PDU_SESSION_ESTABLISHMENT_ACC:
+          case FGS_PDU_SESSION_ESTABLISHMENT_ACC:		  	
+            LOG_I(NAS, "Received pdu session establishment accept\n");
             handle_pdu_session_accept(nas, pdu_buffer, pdu_length, nas->UE_id);
             break;
           case FGS_PDU_SESSION_ESTABLISHMENT_REJ:
@@ -2499,15 +3262,18 @@ void *nas_nrue(void *args_p)
             break;
           case FGS_REGISTRATION_REJECT:
             handle_registration_reject(nas, &buffer);
+
             break;
           case FGS_SERVICE_ACCEPT: {
             handle_service_accept(nas, &buffer);
+
             break;
           }
 
           case FGS_SERVICE_REJECT: {
             byte_array_t buffer = {.buf = pdu_buffer, .len = pdu_length};
             handle_service_reject(nas, &buffer);
+
             break;
           }
 
@@ -2531,7 +3297,10 @@ void *nas_nrue(void *args_p)
         create_ue_ip_if(ip, NULL, nas->UE_id, pdu_session_id, is_default);
         break;
       }
-
+	  case TIMER_HAS_EXPIRED: {
+		  nas_timer_fire(TIMER_HAS_EXPIRED(msg_p).arg);
+		break;
+	  }
       default:
         LOG_E(NAS, "[UE %ld] Received unexpected message %s\n", nas->UE_id, ITTI_MSG_NAME(msg_p));
         break;

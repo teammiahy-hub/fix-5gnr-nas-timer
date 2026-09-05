@@ -64,6 +64,7 @@
 #define NAS_UPLINK_DATA_REQ(mSGpTR)     (mSGpTR)->ittiMsg.nas_ul_data_req
 #define NAS_INITIAL_UL_TRANSFER_REQ(mSGpTR) (mSGpTR)->ittiMsg.nas_initial_ul_transfer_req
 #define NAS_DETACH_REQ(mSGpTR)          (mSGpTR)->ittiMsg.nas_detach_req
+#define NAS_ABORT_REQ(mSGpTR)          (mSGpTR)->ittiMsg.nas_abort_req
 #define NAS_DEREGISTRATION_REQ(mSGpTR)  (mSGpTR)->ittiMsg.nas_deregistration_req
 #define NAS_5GMM_IND(mSGpTR)            (mSGpTR)->ittiMsg.nas_5gmm_ind
 

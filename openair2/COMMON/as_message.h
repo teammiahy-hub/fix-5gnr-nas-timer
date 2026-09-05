@@ -381,6 +381,10 @@ typedef struct nas_detach_req_s {
   bool wait_release;
 } nas_detach_req_t;
 
+typedef struct nas_abort_req_s {
+  release_cause_t cause;
+} nas_abort_req_t;
+
 /**
  * @brief 5GS mobility management information
  * @ref   clause 9.11.3 of 3GPP TS 24.501

@@ -2272,11 +2272,29 @@ static void rrc_ue_generate_RRCSetupComplete(NR_UE_RRC_INST_t *rrc, const uint8_
     } else {
       // Send Initial NAS message (Registration Request) before Security Mode control procedure
       generateRegistrationRequest(&initialNasMsg, nas, false);
+	  if (!initialNasMsg.nas_data) {
+        RRCLOG_E("Failed to complete generate Registration Request. NAS InitialUEMessage message not found.\n");
+        return;
+      }	
+	  /*
+	   * A UE enters the state 5GMM-REGISTERED-INITIATED after it has started the initial registration procedure or the
+	   * non-initial registration procedure, and is waiting for a response from the network. */
+      nas->fiveGMM_state = FGS_REGISTERED_INITIATED;	  
+	  if (!nas->lowerlayer_data) {
+		  RRCLOG_E("Failed to complete RRCSetup. NAS lower layer data not allocated.\n");
+		  return;
+	  }
+	  nr_registration_lowerlayer_initialize(nas->lowerlayer_data,  
+											 nr_proc_registration_request,	
+											 nr_proc_registration_failure,	
+											 nr_proc_registration_release,	
+											 nas);
+
     }
     if (!initialNasMsg.nas_data) {
       RRCLOG_E("Failed to complete RRCSetup. NAS InitialUEMessage message not found.\n");
       return;
-    }
+    }	
   } else {
     initialNasMsg.length = sizeof(nr_nas_attach_req_imsi_dummy_NSA_case);
     initialNasMsg.nas_data = malloc_or_fail(initialNasMsg.length);
@@ -3420,6 +3438,10 @@ void *rrc_nrue(void *notUsed)
       NR_Release_Cause_t release_cause = OTHER;
       nr_rrc_going_to_IDLE(rrc, release_cause, NULL);
     }
+    break;
+
+  case NAS_ABORT_REQ:
+      nr_rrc_going_to_IDLE(rrc, OTHER, NULL);
     break;
 
   case NAS_UPLINK_DATA_REQ: {

@@ -886,6 +886,8 @@ void _fgmm_timers_initialize(fgmm_timers_t *fgmm_timers) {
   fgmm_timers->T3510.sec = T3510_DEFAULT_VALUE;
   fgmm_timers->T3511.id = NAS_TIMER_INACTIVE_ID;
   fgmm_timers->T3511.sec = T3511_DEFAULT_VALUE;
+  fgmm_timers->T3512.id = NAS_TIMER_INACTIVE_ID;
+  fgmm_timers->T3512.sec = T3512_DEFAULT_VALUE;
   fgmm_timers->T3516.id = NAS_TIMER_INACTIVE_ID;
   fgmm_timers->T3516.sec = T3516_DEFAULT_VALUE;
   fgmm_timers->T3517.id = NAS_TIMER_INACTIVE_ID;
@@ -959,15 +961,15 @@ static FGMMCapability set_fgmm_capability()
 
 static FGSRegistrationType set_fgs_registration_type(nr_ue_nas_t *nas)
 {
-  if (nas->fiveGMM_state == FGS_REGISTERED && nas->fiveGMM_mode == FGS_IDLE && nas->t3512) {
-    // TODO: if the timer expires, do PERIODIC_REGISTRATION_UPDATING
+  if (nas->fiveGMM_state == FGS_PERIODIC_REGISTRATION_UPDATE_INITIATED) {
     /** The UE shall initiate the registration procedure for
      *  mobility and periodic registration update according to
      *  5.5.1.3.2 of 3GPP TS 24.501: Mobility and periodic
      *  registration update initiation */
-    LOG_E(NAS, "Registration type periodic registration updating is not handled\n");
-    return REG_TYPE_RESERVED;
+    LOG_E(NAS, "Registration type periodic registration updating\n");
+    return PERIODIC_REGISTRATION_UPDATING;
   } else if (nas->fiveGMM_state == FGS_REGISTERED) {
+    //TODO
     // in any other case, The UE in state 5GMM-REGISTERED shall indicate "mobility registration updating".
     return MOBILITY_REGISTRATION_UPDATING;
   }
@@ -1029,14 +1031,14 @@ void generateRegistrationRequest(as_nas_info_t *initialNasMsg, nr_ue_nas_t *nas,
   }
 
   // Security Capability
-  rr->presencemask |= REGISTRATION_REQUEST_UE_SECURITY_CAPABILITY_PRESENT;
-  rr->nruesecuritycapability.iei = REGISTRATION_REQUEST_UE_SECURITY_CAPABILITY_IEI;
-  rr->nruesecuritycapability.length = 8;
-  rr->nruesecuritycapability.fg_EA = 0xe0;
-  rr->nruesecuritycapability.fg_IA = 0x60;
-  rr->nruesecuritycapability.EEA = 0;
-  rr->nruesecuritycapability.EIA = 0;
-  size += 10;
+  rr->presencemask |= REGISTRATION_REQUEST_UE_SECURITY_CAPABILITY_PRESENT;	
+  rr->nruesecuritycapability.iei = REGISTRATION_REQUEST_UE_SECURITY_CAPABILITY_IEI;  
+  rr->nruesecuritycapability.length = 4;   // was 8 — only fg_EA/fg_IA/EEA/EIA are actually encoded  
+  rr->nruesecuritycapability.fg_EA = 0xe0;	
+  rr->nruesecuritycapability.fg_IA = 0x60;	
+  rr->nruesecuritycapability.EEA = 0;  
+  rr->nruesecuritycapability.EIA = 0;  
+  size += 6;   // was 10 — iei(1) + length(1) + 4 content bytes = 6, not 2 + 8
 
   /* Create a copy of the cleartext 5GMM message, add non-cleartext IEs if necessary */
   fgmm_nas_message_plain_t full_mm = sp.plain;
@@ -1053,7 +1055,27 @@ void generateRegistrationRequest(as_nas_info_t *initialNasMsg, nr_ue_nas_t *nas,
     size_nct += sizeof(cap->length) + sizeof(cap->iei) + cap->length;
   }
 
-  if (is_security_mode) {
+  // Encode pdu session status
+  printf("has_security_context: %d type : %d\n",
+           has_security_context,
+           full_rr->fgsregistrationtype);
+  /* PDU Session Status (non-cleartext IE) - 24.501 9.11.3.44 / 5.5.1.3  
+	 Sent by the UE during a periodic registration updating procedure to indicate  
+	 which PDU sessions it locally considers established. */  
+	  /* PDU Session Status (non-cleartext IE) - 24.501 9.11.3.44 / 5.5.1.3 */	
+  if (has_security_context && full_rr->fgsregistrationtype == PERIODIC_REGISTRATION_UPDATING) {  
+	cleartext_only = false; // forces the ciphered-NAS-container path  
+	full_rr->has_pdu_session_status = true;  
+	full_rr->presencemask |= REGISTRATION_REQUEST_PDU_SESSION_STATUS_PRESENT;  
+	for (const pdu_session_config_t *pdu = nas->uicc->pdu_sessions;  
+		 pdu < nas->uicc->pdu_sessions + nas->uicc->n_pdu_sessions; ++pdu) {  
+	  if (pdu->id > 0 && pdu->id < MAX_NUM_PSI)  
+		full_rr->pdu_session_status[pdu->id] = PDU_SESSION_ACTIVE;	
+	}  
+	size_nct += MIN_PDU_SESSION_CONTENTS_LEN + 2;  
+  }
+
+  if (is_security_mode  ) {
     /* Encode both cleartext IEs and non-cleartext IEs Registration Request message in Security Mode Complete.
        The UE includes the full Registration Request in the NAS container IE
        and sends it within the Security Mode Complete message. (24.501 4.4.6, 23.502 4.2.2.2.2) */
@@ -1073,18 +1095,39 @@ void generateRegistrationRequest(as_nas_info_t *initialNasMsg, nr_ue_nas_t *nas,
     LOG_D(NAS, "Initial NAS Message: Registration Request with ciphered NAS container\n");
 
     // NAS message container
-    if (!cleartext_only) {
-      OctetString *nasmessagecontainercontents = &rr->fgsnasmessagecontainer.nasmessagecontainercontents;
-      nasmessagecontainercontents->value = calloc_or_fail(size_nct, sizeof(*nasmessagecontainercontents->value));
-      nasmessagecontainercontents->length = mm_msg_encode(&full_mm, nasmessagecontainercontents->value, size_nct);
-      size += (nasmessagecontainercontents->length + 2);
-      rr->presencemask |= REGISTRATION_REQUEST_NAS_MESSAGE_CONTAINER_PRESENT;
-      // Workaround to pass integrity in RRC_IDLE
-      uint8_t *kamf = nas->security.kamf;
-      uint8_t *kgnb = nas->security.kgnb;
-      derive_kgnb(kamf, nas->security.nas_count_ul, kgnb);
-      nas_itti_kgnb_refresh_req(nas->UE_id, nas->security.kgnb);
-    }
+	// NAS message container  
+	 if (!cleartext_only) {  
+	   OctetString *nasmessagecontainercontents = &rr->fgsnasmessagecontainer.nasmessagecontainercontents;	
+	
+	   uint8_t *inner = calloc_or_fail(size_nct, sizeof(*inner));  
+	   int inner_len = mm_msg_encode(&full_mm, inner, size_nct);  
+	   AssertFatal(inner_len > 0, "Failed to encode Registration Request NAS container payload\n");  
+	
+	   // Cipher the container value itself (TS 24.501 4.4.6)  
+	   AssertFatal(nas->security.nas_count_ul <= 0xffffff, "fatal: NAS COUNT UL too big (todo: fix that)\n");  
+	   uint8_t *ciphered = calloc_or_fail(inner_len, sizeof(*ciphered));  
+	   nas_stream_cipher_t container_cipher = {0};	
+	   container_cipher.context = nas->security_container->ciphering_context;  
+	   container_cipher.count = nas->security.nas_count_ul; // NOT incremented here; outer MAC step below increments it  
+	   container_cipher.bearer = 1;  
+	   container_cipher.direction = 0;	
+	   container_cipher.message = inner;  
+	   container_cipher.blength = inner_len << 3;  
+	   stream_compute_encrypt(nas->security_container->ciphering_algorithm, &container_cipher, ciphered);  
+	
+	   nasmessagecontainercontents->value = ciphered;  
+	   nasmessagecontainercontents->length = inner_len;  
+	   free(inner);  
+	
+	   size += (nasmessagecontainercontents->length + 2);  
+	   rr->presencemask |= REGISTRATION_REQUEST_NAS_MESSAGE_CONTAINER_PRESENT;	
+	   // Workaround to pass integrity in RRC_IDLE	
+	   uint8_t *kamf = nas->security.kamf;	
+	   uint8_t *kgnb = nas->security.kgnb;	
+	   derive_kgnb(kamf, nas->security.nas_count_ul, kgnb);  
+	   nas_itti_kgnb_refresh_req(nas->UE_id, nas->security.kgnb);  
+	 }
+
     // Allocate buffer (including NAS message container size)
     initialNasMsg->nas_data = malloc_or_fail(size * sizeof(*initialNasMsg->nas_data));
 
@@ -1115,6 +1158,12 @@ void generateRegistrationRequest(as_nas_info_t *initialNasMsg, nr_ue_nas_t *nas,
       initialNasMsg->nas_data[mac_start_octet + i] = mac[i];
     }
   }
+
+  // Dump the final encoded Registration Request for Wireshark dissection  
+  if (initialNasMsg->nas_data && initialNasMsg->length > 0) {  
+    log_dump(NAS, initialNasMsg->nas_data, initialNasMsg->length, LOG_DUMP_CHAR,  
+             "Registration Request raw bytes (%u):\n", initialNasMsg->length);  
+  }  
 
   nas->fgmm_reg_data.fgsregistrationtype = full_rr->fgsregistrationtype;
   nas->fgmm_timer.T3502.id = nas_timer_stop(nas->fgmm_timer.T3502.id);
@@ -1432,6 +1481,9 @@ static void handle_authentication_reject(nr_ue_nas_t *nas, uint8_t *pdu, int pdu
 
   /* Stop timer T3516 */
   nas->fgmm_timer.T3516.id = nas_timer_stop(nas->fgmm_timer.T3516.id);
+
+  /* Stop timer T3512 */
+  nas->fgmm_timer.T3512.id = nas_timer_stop(nas->fgmm_timer.T3512.id);
 
   nas->fgs_status = FGS_U3_ROAMING_NOT_ALLOWED;
 
@@ -2221,13 +2273,11 @@ void *fgmm_expiry_t3502_handler(void *args)
   /* Stop T3502 timer */
   nas->fgmm_timer.T3502.id = nas_timer_stop(nas->fgmm_timer.T3502.id);
   nas->fiveGMM_state = FGS_DEREGISTERED_ATTEMPTING_REGISTRATION;
-
   nas->fgmm_reg_data.attempt_count = 0;
-
-  nas->fiveGMM_state = FGS_REGISTERED_INITIATED;
 
   as_nas_info_t initialNasMsg = {0};
   generateRegistrationRequest(&initialNasMsg, nas, false);
+  nas->fiveGMM_state = FGS_REGISTERED_INITIATED;
   if (!initialNasMsg.nas_data) {
   	//TODO error handling
 	LOG_E(NAS, "Failed to initiate initial Registration Request)\n");
@@ -2279,6 +2329,44 @@ void *fgmm_expiry_t3510_handler(void *args)
 
 /****************************************************************************
  **                                                                        **
+ ** Name:    fgmm_expiry_t3512_handler()                               **
+ **                                                                        **
+ ** Description: T3512 timeout handler                                     **
+ **                                                                        **
+ **              3GPP TS 24.501, section 5.5.2.2.4 case c                  **
+ **      On the first expiry, it triggers periodic registration request    **
+ ** Inputs:  args:      handler parameters                         **
+ **                                                                        **
+ ** Outputs:     None                                                      **
+ **      Return:    None                                       **
+ **      Others:    None                                       **
+ **                                                                        **
+ ***************************************************************************/
+void *fgmm_expiry_t3512_handler(void *args)
+{
+  LOG_FUNC_IN;
+
+  nr_ue_nas_t *nas=args;
+
+  LOG_TRACE(WARNING, "5G MM-PROC	- T3512 timer expired");
+
+  if (nas->fgmm_reg_data.fgsregistrationtype == EMERGENCY_REGISTRATION) {
+    //TODO shall locally de-register from the network
+	LOG_FUNC_RETURN(NULL);
+  }
+
+  nas->fiveGMM_state = FGS_PERIODIC_REGISTRATION_UPDATE_INITIATED;
+
+  as_nas_info_t rr = {0};
+  generateRegistrationRequest(&rr, nas, false);
+  send_nas_initial_ul_transfer_req(nas, &rr);
+
+  LOG_FUNC_RETURN(NULL);
+}
+
+
+/****************************************************************************
+ **                                                                        **
  ** Name:    fgmm_expiry_t3511_handler()                               **
  **                                                                        **
  ** Description: T3511 timeout handler                                     **
@@ -2307,9 +2395,6 @@ void *fgmm_expiry_t3511_handler(void *args)
   nas->fgmm_timer.T3511.id = nas_timer_stop(nas->fgmm_timer.T3511.id);
 
   if (nas->fgmm_reg_data.attempt_count <= FGS_REGISTRATION_COUNTER_MAX) {
-	
-	nas->fiveGMM_state = FGS_REGISTERED_INITIATED;
-
 	// NAS is security protected if has valid security contexts
 	as_nas_info_t retxNasMsg = {0};
 	bool security_protected = nas->security_container && nas->security_container->integrity_context;
@@ -2319,6 +2404,7 @@ void *fgmm_expiry_t3511_handler(void *args)
 	  LOG_E(NAS, "Failed to Resend Registration Request)\n");
 	  LOG_FUNC_RETURN(NULL);
 	}
+	nas->fiveGMM_state = FGS_REGISTERED_INITIATED;
 	LOG_I(NAS, "Resend Registration Request\n");
 	send_nas_uplink_data_req(nas, &retxNasMsg);
   }
@@ -2624,10 +2710,79 @@ int nr_registration_lowerlayer_failure(nr_registration_lowerlayer_data_t *lowerl
   return rc;
 }
 
+/* 3GPP TS 24.008 10.5.7.3 GPRS Timer */
+static int process_gprs_timer(gprs_timer_t *timer)
+{
+  if (!timer)
+    return -1;
+
+  int factor = 0;
+  switch (timer->unit) {
+    case TWO_SECONDS:
+      factor = 2;
+      break;
+    case ONE_MINUTE:
+      factor = 60;
+      break;
+    case DECIHOURS:
+      factor = 360; // 6 minutes
+      break;
+    case DEACTIVATED:
+      return -1;
+    default:
+      factor = 60; // default is 60 seconds
+      break;
+  }
+
+  return timer->value * factor;
+}
+
+/* 3GPP TS 24.008 10.5.7.4a GPRS Timer 3 (used for T3512, T3502, etc.) */  
+static int process_gprs_timer3(gprs_timer_t *timer)
+{
+  if (!timer)
+    return -1;
+
+  int factor = 0;
+  switch (timer->unit) {
+    case 0x00: // 10 minutes
+      factor = 600;
+      break;
+    case 0x01: // 1 hour
+      factor = 3600;
+      break;
+    case 0x02: // 10 hours
+      factor = 36000;
+      break;
+    case 0x03: // 2 seconds
+      factor = 2;
+      break;
+    case 0x04: // 30 seconds
+      factor = 30;
+      break;
+    case 0x05: // 1 minute
+      factor = 60;
+      break;
+    case 0x06: // 320 hours
+      factor = 1152000;
+      break;
+    case 0x07: // deactivated
+      return -1;
+    default:
+      factor = 600; // default is 10 minutes
+      break;
+  }  
+
+  return timer->value * factor;
+}
+
 static void handle_registration_accept(nr_ue_nas_t *nas, const uint8_t *pdu_buffer, uint32_t msg_length)
 {
   registration_accept_msg msg = {0};
   fgs_nas_message_security_header_t sp_header = {0};
+
+  log_dump(NAS, pdu_buffer, msg_length, LOG_DUMP_CHAR, "Registration Accept raw bytes (%u):\n", msg_length);  
+
   const uint8_t *end = pdu_buffer + msg_length;
   // security protected header
   int decoded = decode_5gs_security_protected_header(&sp_header, pdu_buffer, msg_length);
@@ -2660,6 +2815,16 @@ static void handle_registration_accept(nr_ue_nas_t *nas, const uint8_t *pdu_buff
                                                          : "3GPP and non-3GPP");
   LOG_I(NAS, "SMS %s in 5GS Registration Result\n", msg.sms_allowed ? "allowed" : "not allowed");
 
+  if (msg.t3512) {
+	  nas->fgmm_timer.T3512.sec = process_gprs_timer3(msg.t3512);
+	  LOG_I(NAS, "Received Periodic Registration request timer T3512 value %ld sec\n",
+	  	nas->fgmm_timer.T3512.sec);
+	  //Timer deactivated or zero
+	  if (msg.t3512->unit == 0x111 || msg.t3512->value == 0) {
+		  nas->fgmm_timer.T3512.sec = 0;
+	  }
+  }
+
   pdu_buffer += decoded;
   // process GUTI
   if (msg.guti) {
@@ -2685,21 +2850,24 @@ static void handle_registration_accept(nr_ue_nas_t *nas, const uint8_t *pdu_buff
 
   if (nas->uicc->n_pdu_sessions == 0)
     LOG_W(SIM, "no PDU sessions to request configured\n");
-  for (const pdu_session_config_t *pdu = nas->uicc->pdu_sessions; pdu < nas->uicc->pdu_sessions + nas->uicc->n_pdu_sessions; ++pdu) {
-    if (get_user_nssai_idx(pdu->nssai, msg.nas_allowed_nssai) < 0) {
-      LOG_E(NAS,
-            "PDU session ID %d NSSAI %d.%d: mismatch for allowed NSSAI. Couldn't request PDU session.\n",
-            pdu->id,
-            pdu->nssai.sst,
-            pdu->nssai.sd);
-    } else {
-      LOG_I(NAS, "requested PDU session ID %d type %d NSSAI %d.%d DNN %s\n", pdu->id, pdu->type, pdu->nssai.sst, pdu->nssai.sd, pdu->dnn);
-      request_pdusession(nas, pdu);
-    }
+  if(nas->fgmm_reg_data.fgsregistrationtype == INITIAL_REGISTRATION) {
+	  for (const pdu_session_config_t *pdu = nas->uicc->pdu_sessions; pdu < nas->uicc->pdu_sessions + nas->uicc->n_pdu_sessions; ++pdu) {
+		if (get_user_nssai_idx(pdu->nssai, msg.nas_allowed_nssai) < 0) {
+		  LOG_E(NAS,
+				"PDU session ID %d NSSAI %d.%d: mismatch for allowed NSSAI. Couldn't request PDU session.\n",
+				pdu->id,
+				pdu->nssai.sst,
+				pdu->nssai.sd);
+		} else {
+		  LOG_I(NAS, "requested PDU session ID %d type %d NSSAI %d.%d DNN %s\n", pdu->id, pdu->type, pdu->nssai.sst, pdu->nssai.sd, pdu->dnn);
+		  request_pdusession(nas, pdu);
+		}
+	  }
   }
+
   nas->fgmm_reg_data.attempt_count = 0;
 
-  nas->fiveGMM_state = FGS_REGISTERED;
+  nas->fiveGMM_state = FGS_REGISTERED_NORMAL_SERVICE;
 
   nas->fgs_status = FGS_U1_UPDATED;
 
@@ -2715,33 +2883,6 @@ static void handle_registration_accept(nr_ue_nas_t *nas, const uint8_t *pdu_buff
 
   // Free local message after processing
   free_fgmm_registration_accept(&msg);
-}
-
-/* 3GPP TS 24.008 10.5.7.3 GPRS Timer */
-static int process_gprs_timer(gprs_timer_t *timer)
-{
-  if (!timer)
-    return -1;
-
-  int factor = 0;
-  switch (timer->unit) {
-    case TWO_SECONDS:
-      factor = 2;
-      break;
-    case ONE_MINUTE:
-      factor = 60;
-      break;
-    case DECIHOURS:
-      factor = 360; // 6 minutes
-      break;
-    case DEACTIVATED:
-      return -1;
-    default:
-      factor = 60; // default is 60 seconds
-      break;
-  }
-
-  return timer->value * factor;
 }
 
 static void handle_service_accept(nr_ue_nas_t *nas, const byte_array_t *buffer)
@@ -2944,6 +3085,8 @@ static void handle_registration_reject(nr_ue_nas_t *nas, const byte_array_t *buf
   nas->termination_procedure = true;
   /* Stop T3510 */
   nas->fgmm_timer.T3510.id = nas_timer_stop(nas->fgmm_timer.T3510.id);
+  /* Stop timer T3512 */
+  nas->fgmm_timer.T3512.id = nas_timer_stop(nas->fgmm_timer.T3512.id);
 
   /* Stop timer T3516 */
   nas->fgmm_timer.T3516.id = nas_timer_stop(nas->fgmm_timer.T3516.id);
@@ -3098,6 +3241,8 @@ void *nas_nrue(void *args_p)
 
       case NR_NAS_CONN_ESTABLISH_IND: {
         nas->fiveGMM_mode = FGS_CONNECTED;
+		/* Stop timer T3512 */
+		nas->fgmm_timer.T3512.id = nas_timer_stop(nas->fgmm_timer.T3512.id);
         LOG_I(NAS,
               "[UE %ld] Received %s: asCause %u\n",
               nas->UE_id,
@@ -3160,6 +3305,18 @@ void *nas_nrue(void *args_p)
 		else if (nas->fiveGMM_state == FGS_REGISTERED_INITIATED) {
     		_fgmm_registration_abnormal_cases_cde(nas);
 			break;
+		} else if (nas->fiveGMM_state == FGS_REGISTERED_NORMAL_SERVICE) {
+		    //Entered IDLE and in FGS_REGISTERED, start T3512 periodic registration timer
+			/* Start T3512 timer */
+			if (nas->fgmm_timer.T3512.id == NAS_TIMER_INACTIVE_ID) {
+			    if (!(nas->fgmm_timer.T3512.sec == 0)) {
+					nas->fgmm_timer.T3512.id = nas_timer_start_ext(nas->UE_id, nas->fgmm_timer.T3512.sec, fgmm_expiry_t3512_handler, nas);
+					LOG_I(NAS, "5G MM-PROC	- Timer T3512 (%d) started. Expires in %ld seconds\n",
+							   nas->fgmm_timer.T3512.id,
+							   nas->fgmm_timer.T3512.sec);
+	            }
+			}
+			break;
 		}
 
 		/* Stop timer T3516 */
@@ -3174,6 +3331,8 @@ void *nas_nrue(void *args_p)
           usleep(100000);
 		  nas->termination_procedure = false;		  
           nas->fiveGMM_state = FGS_DEREGISTERED;
+		  /* Stop timer T3512 */
+		  nas->fgmm_timer.T3512.id = nas_timer_stop(nas->fgmm_timer.T3512.id);
           itti_wait_tasks_unblock(); /* will unblock ITTI to stop nr-uesoftmodem */
         }
 
@@ -3249,6 +3408,8 @@ void *nas_nrue(void *args_p)
             LOG_I(NAS, "Received deregistration accept\n");
             /* Set NAS 5GMM state */
             nas->fiveGMM_state = FGS_DEREGISTERED;
+			/* Stop timer T3512 */
+			nas->fgmm_timer.T3512.id = nas_timer_stop(nas->fgmm_timer.T3512.id);
 
 			/* Stop timer T3516 */
             nas->fgmm_timer.T3516.id = nas_timer_stop(nas->fgmm_timer.T3516.id);

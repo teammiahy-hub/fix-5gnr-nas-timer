@@ -84,6 +84,28 @@ int encode_registration_request(const registration_request_msg *registration_req
       encoded += encode_result;
   }
 
+  // PDU session status (Optional) - 9.11.3.44 of 3GPP TS 24.501  
+   if ((registration_request->presencemask & REGISTRATION_REQUEST_PDU_SESSION_STATUS_PRESENT)  
+	   == REGISTRATION_REQUEST_PDU_SESSION_STATUS_PRESENT) {  
+	 byte_array_t ba = { .buf = buffer + encoded, .len = len - encoded };  
+	 if ((encode_result = encode_pdu_session_ie(&ba, REGISTRATION_REQUEST_PDU_SESSION_STATUS_IEI,  
+												 registration_request->pdu_session_status)) < 0)  
+	   return encode_result;  
+	 encoded += encode_result;	
+   }  
+   
+   if ((registration_request->presencemask & REGISTRATION_REQUEST_NAS_MESSAGE_CONTAINER_PRESENT)  
+	   == REGISTRATION_REQUEST_NAS_MESSAGE_CONTAINER_PRESENT) {  
+	 if ((encode_result = encode_fgc_nas_message_container(&registration_request->fgsnasmessagecontainer,  
+															 REGISTRATION_REQUEST_NAS_MESSAGE_CONTAINER_IEI,  
+															 buffer + encoded,	
+															 len - encoded))  
+		 < 0)  
+	   return encode_result;  
+	 else  
+	   encoded += encode_result;  
+   }  
+
   // TODO, Encoding optional fields
   return encoded;
 }

@@ -15,6 +15,7 @@
 #include "NrUESecurityCapability.h"
 #include "SecurityHeaderType.h"
 #include "FGCNasMessageContainer.h"
+#include "fgmm_lib.h"
 
 #ifndef REGISTRATION_REQUEST_H_
 #define REGISTRATION_REQUEST_H_
@@ -86,6 +87,9 @@ typedef struct registration_request_msg_tag {
   uint32_t presencemask;
   FGMMCapability fgmmcapability;
   NrUESecurityCapability nruesecuritycapability;
+
+  bool has_pdu_session_status;
+  uint8_t pdu_session_status[MAX_NUM_PSI];
 } registration_request_msg;
 
 int decode_registration_request(registration_request_msg *registrationrequest, const uint8_t *buffer, uint32_t len);

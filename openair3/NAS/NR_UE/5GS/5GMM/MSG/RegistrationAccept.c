@@ -112,6 +112,87 @@ static int decode_nssai_ie(nr_nas_msg_snssai_t *nssai, uint8_t *num_slices, uint
   return decoded;
 }
 
+static int decode_5gs_network_feature_support_ie(nr_nas_msg_5gs_feat_support_t *fs, uint8_t *buf)  
+{  
+  const int length = *buf++; // 1 or 2 octets of content  
+  const int decoded = length + 1;  
+  
+  fs->ims_vops       = buf[0] & 0x01;  
+  fs->ims_vops_n3gpp = (buf[0] >> 1) & 0x01;  
+  fs->emc            = (buf[0] >> 2) & 0x03;  
+  fs->emf            = (buf[0] >> 4) & 0x03;  
+  fs->iwk_n26        = (buf[0] >> 6) & 0x01;  
+  fs->mpsi           = (buf[0] >> 7) & 0x01;  
+  
+  if (length >= 2) {  
+    fs->cp_ciot_5gs      = buf[1] & 0x01;  
+    fs->n3_data          = (buf[1] >> 1) & 0x01;  
+    fs->iphc_cp_ciot_5gs = (buf[1] >> 2) & 0x01;  
+    fs->up_ciot_5gs      = (buf[1] >> 3) & 0x01;  
+    fs->restrict_ec      = (buf[1] >> 4) & 0x03;  
+    fs->mcsi             = (buf[1] >> 6) & 0x01;  
+    fs->emcn3            = (buf[1] >> 7) & 0x01;  
+  }  
+  return decoded;  
+}
+
+/** @brief Decode 5GS Tracking Area Identity List (9.11.3.9 TS 24.501) */  
+static int decode_tai_list_ie(nr_nas_msg_tai_t *tai_list, uint8_t *num_tai, uint8_t *buf)  
+{  
+  const int length = *buf++; // Length of TAI list IE contents  
+  const int decoded = length + 1;  
+  const uint8_t *end = buf + length;  
+  int cnt = 0;  
+  
+  while (buf < end) {  
+    uint8_t type_of_list = (*buf >> 5) & 0x03;  
+    uint8_t num_elements = (*buf & 0x1F) + 1; // coded as N-1  
+    buf++;  
+  
+    if (type_of_list == 0x00) {  
+      // list of TACs belonging to one PLMN with non-consecutive TAC values  
+      uint8_t mccdigit2 = (buf[0] >> 4) & 0xF, mccdigit1 = buf[0] & 0xF;  
+      uint8_t mncdigit3 = (buf[1] >> 4) & 0xF, mccdigit3 = buf[1] & 0xF;  
+      uint8_t mncdigit2 = (buf[2] >> 4) & 0xF, mncdigit1 = buf[2] & 0xF;  
+      buf += 3;  
+      for (int i = 0; i < num_elements && cnt < NAS_MAX_TAI; i++) {  
+        nr_nas_msg_tai_t *t = &tai_list[cnt++];  
+        t->mccdigit1 = mccdigit1; t->mccdigit2 = mccdigit2; t->mccdigit3 = mccdigit3;  
+        t->mncdigit1 = mncdigit1; t->mncdigit2 = mncdigit2; t->mncdigit3 = mncdigit3;  
+        t->tac = (buf[0] << 16) | (buf[1] << 8) | buf[2];  
+        buf += 3;  
+      }  
+    } else if (type_of_list == 0x01) {  
+      // list of TACs belonging to one PLMN with consecutive TAC values  
+      uint8_t mccdigit2 = (buf[0] >> 4) & 0xF, mccdigit1 = buf[0] & 0xF;  
+      uint8_t mncdigit3 = (buf[1] >> 4) & 0xF, mccdigit3 = buf[1] & 0xF;  
+      uint8_t mncdigit2 = (buf[2] >> 4) & 0xF, mncdigit1 = buf[2] & 0xF;  
+      buf += 3;  
+      uint32_t base_tac = (buf[0] << 16) | (buf[1] << 8) | buf[2];  
+      buf += 3;  
+      for (int i = 0; i < num_elements && cnt < NAS_MAX_TAI; i++) {  
+        nr_nas_msg_tai_t *t = &tai_list[cnt++];  
+        t->mccdigit1 = mccdigit1; t->mccdigit2 = mccdigit2; t->mccdigit3 = mccdigit3;  
+        t->mncdigit1 = mncdigit1; t->mncdigit2 = mncdigit2; t->mncdigit3 = mncdigit3;  
+        t->tac = base_tac + i;  
+      }  
+    } else {  
+      // 0x02: list of TAIs belonging to different PLMNs (matches your example)  
+      for (int i = 0; i < num_elements && cnt < NAS_MAX_TAI; i++) {  
+        nr_nas_msg_tai_t *t = &tai_list[cnt++];  
+        t->mccdigit2 = (buf[0] >> 4) & 0xF; t->mccdigit1 = buf[0] & 0xF;  
+        t->mncdigit3 = (buf[1] >> 4) & 0xF; t->mccdigit3 = buf[1] & 0xF;  
+        t->mncdigit2 = (buf[2] >> 4) & 0xF; t->mncdigit1 = buf[2] & 0xF;  
+        buf += 3;  
+        t->tac = (buf[0] << 16) | (buf[1] << 8) | buf[2];  
+        buf += 3;  
+      }  
+    }  
+  }  
+  *num_tai = cnt;  
+  return decoded;  
+}
+
 size_t decode_registration_accept(registration_accept_msg *registration_accept, const byte_array_t buffer)
 {
   int dec = 0;
@@ -154,7 +235,36 @@ size_t decode_registration_accept(registration_accept_msg *registration_accept, 
         UPDATE_BYTE_ARRAY(ba, dec);
         break;
 
+	  case IEI_TAI_LIST: // 0x54
+		dec = decode_tai_list_ie(registration_accept->tai_list, &registration_accept->num_tai, ba.buf);
+		UPDATE_BYTE_ARRAY(ba, dec);
+		break;
+
+	  case IEI_NETWORK_FEATURE_SUPPORT: // 0x21
+		dec = decode_5gs_network_feature_support_ie(&registration_accept->feature_support, ba.buf);		
+		UPDATE_BYTE_ARRAY(ba, dec);
+		break;
+
+	  case IEI_T3512_VALUE: { // 0x5e
+		byte_array_t timer_ba = {.buf = ba.buf, .len = ba.len};
+		registration_accept->t3512 = calloc_or_fail(1, sizeof(*registration_accept->t3512));  
+		dec = decode_gprs_timer_ie(registration_accept->t3512, &timer_ba);
+		UPDATE_BYTE_ARRAY(ba, dec);
+		break;
+	  }
+
+      case IEI_PDU_SESSION_STATUS: // 0x50 - PDU session status
+        dec = decode_pdu_session_ie(registration_accept->pdu_session_status, &ba);
+        if (dec < 0) {
+          PRINT_ERROR("Failed to decode PDU Session Status in Registration Accept\n");
+          return -1;
+        }
+        registration_accept->has_pdu_session_status = true;
+        UPDATE_BYTE_ARRAY(ba, dec);
+        break;
+
       default:
+	  	PRINT_ERROR("Unknown IE: 0x%02X received\n", iei);
         dec = ba.buf[0] + 1; // content length + 1 byte (Length IE)
         UPDATE_BYTE_ARRAY(ba, dec);
         break;

@@ -20,6 +20,7 @@
 #define T3502_DEFAULT_VALUE 720 /* 12 minutes   */
 #define T3510_DEFAULT_VALUE 15 /* 15 seconds   */
 #define T3511_DEFAULT_VALUE 10 /* 10 seconds   */
+#define T3512_DEFAULT_VALUE 3240 /* 54 minutes   */
 #define T3516_DEFAULT_VALUE 30 /* 30 seconds   */
 #define T3517_DEFAULT_VALUE 15 /* 15 seconds   */
 #define T3519_DEFAULT_VALUE 60 /* 60 seconds   */
@@ -39,8 +40,9 @@ typedef struct {
 
 typedef struct {
     struct nas_timer_t T3502;   /* registration failure timer         */	
-    struct nas_timer_t T3510;   /* registration timer             */
-    struct nas_timer_t T3511;   /* registration restart timer             */
+    struct nas_timer_t T3510;   /* registration timer             */	
+    struct nas_timer_t T3511;   /* registration restart timer             */	
+    struct nas_timer_t T3512;   /* periodic registration timer             */
     struct nas_timer_t T3516;   /* 5GS authentication challenge timer   */
     struct nas_timer_t T3517;   /* Service request timer        */
     struct nas_timer_t T3519;   /* Fresh suci timer        */
@@ -147,8 +149,6 @@ typedef struct {
   bool is_rrc_inactive;
   fgmm_timers_t fgmm_timer;
   
-  /* Timer T3512 */
-  int t3512;
   // Timer t3448 in seconds (-1 = disabled)
   int t3448;
   // Timer t3446 in seconds (-1 = disabled)

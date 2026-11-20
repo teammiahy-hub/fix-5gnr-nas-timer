@@ -1179,7 +1179,8 @@ NR_MeasConfig_t *get_MeasConfig(gNB_RRC_UE_t *ue,
                                 int band,
                                 int nr_pci,
                                 NR_ReportConfigToAddMod_t *rc_PER,
-                                NR_ReportConfigToAddMod_t *rc_A2,
+                                NR_ReportConfigToAddMod_t *rc_A2,                                
+	                            NR_ReportConfigToAddMod_t *rc_D1,
                                 seq_arr_t *rc_A3_seq,
                                 seq_arr_t *neigh_seq,
                                 int *neigh_a3_id)
@@ -1270,6 +1271,13 @@ NR_MeasConfig_t *get_MeasConfig(gNB_RRC_UE_t *ue,
     int meas_obj_id = serving_cell_measobj_id;
     NR_MeasIdToAddMod_t *measid_A2 = get_MeasId(meas_idx, rc_A2->reportConfigId, meas_obj_id);
     asn1cSeqAdd(&mc->measIdToAddModList->list, measid_A2);
+  }
+
+  if (rc_D1) {	
+	asn1cSeqAdd(&mc->reportConfigToAddModList->list, rc_D1);   // don't forget this!  
+	int meas_idx = allocate_measurement_id(ue);  
+	NR_MeasIdToAddMod_t *measid_D1 = get_MeasId(meas_idx, rc_D1->reportConfigId, serving_cell_measobj_id);  
+	asn1cSeqAdd(&mc->measIdToAddModList->list, measid_D1);	
   }
 
   // MeasId for Event A3

@@ -51,6 +51,10 @@
 #include "nr_nas_msg.h"
 #include "openair2/SDAP/nr_sdap/nr_sdap.h"
 #include "openair2/SDAP/nr_sdap/nr_sdap_entity.h"
+#include "openair2/RRC/NR/MESSAGES/NR_ReferenceLocation-r17.h"
+#include "NR_TimeToTrigger.h"
+#include "executables/position_interface.h"
+#include <math.h>  
 
 static NR_UE_RRC_INST_t *NR_UE_rrc_inst[MAX_NUM_NR_UE_INST] = {0};
 /* NAS Attach request with IMSI */
@@ -1199,22 +1203,32 @@ static bool nr_rrc_process_reconfiguration_v1530(NR_UE_RRC_INST_t *rrc, NR_RRCRe
   return dedicatedsib1;
 }
 
-static void handle_meas_reporting_remove(rrcPerNB_t *rrc, int id, NR_UE_Timers_Constants_t *timers)
-{
-  // remove the measurement reporting entry for this measId if included
-  asn1cFreeStruc(asn_DEF_NR_VarMeasReport, rrc->MeasReport[id]);
-  // TODO stop the periodical reporting timer or timer T321, whichever is running,
-  // and reset the associated information (e.g. timeToTrigger) for this measId
-  nr_timer_stop(&timers->T321);
-
-  l3_measurements_t *l3_measurements = &rrc->l3_measurements;
-  meas_report_params_t *params = &l3_measurements->meas_report[id];
-
-  nr_timer_stop(&params->TA2);
-  nr_timer_stop(&params->TA3);
-  nr_timer_stop(&params->periodic_report_timer);
-
-  memset(params, 0, sizeof(*params));
+static void handle_meas_reporting_remove(rrcPerNB_t *rrc, int id, NR_UE_Timers_Constants_t *timers)  
+{  
+  // remove the measurement reporting entry for this measId if included  
+  asn1cFreeStruc(asn_DEF_NR_VarMeasReport, rrc->MeasReport[id]);  
+  // TODO stop the periodical reporting timer or timer T321, whichever is running,  
+  // and reset the associated information (e.g. timeToTrigger) for this measId  
+  nr_timer_stop(&timers->T321);  
+  
+  l3_measurements_t *l3_measurements = &rrc->l3_measurements;  
+  meas_report_params_t *params = &l3_measurements->meas_report[id];  
+  
+  nr_timer_stop(&params->TA2);  
+  nr_timer_stop(&params->TA3);  
+  nr_timer_stop(&params->periodic_report_timer);  
+  
+  // D1 cleanup — must free OCTET STRING buffers BEFORE memset  
+  if (params->d1.configured) {  
+    nr_timer_stop(&params->d1.TD1);  
+    free(params->d1.ref_loc1.buf);  
+    free(params->d1.ref_loc2.buf);  
+    params->d1.ref_loc1.buf = NULL;  
+    params->d1.ref_loc2.buf = NULL;  
+    params->d1.configured = false;  
+  }  
+  
+  memset(params, 0, sizeof(*params));  
 }
 
 static void handle_measobj_remove(rrcPerNB_t *rrc, struct NR_MeasObjectToRemoveList *remove_list, NR_UE_Timers_Constants_t *timers)
@@ -1598,7 +1612,35 @@ static void handle_measid_addmod(rrcPerNB_t *rrc,
             extract_neighbor_cells_from_measObject(obj_nr, neighbor_cells, num_neighbors, max_neighbors, serving_cell_pci);
           }
         }
-      }
+        else if (eventTriggerConfig->eventId.present == NR_EventTriggerConfig__eventId_PR_eventD1_r17) {  
+          struct NR_EventTriggerConfig__eventId__eventD1_r17 *d1 = eventTriggerConfig->eventId.choice.eventD1_r17;  
+          if (!d1)  
+            continue; 
+
+          meas_report_params_t *params = &rrc->l3_measurements.meas_report[id]; // keyed by measId  
+
+          params->d1.distance_thresh1    = d1->distanceThreshFromReference1_r17;  
+          params->d1.distance_thresh2    = d1->distanceThreshFromReference2_r17;  
+          params->d1.hysteresis_location = d1->hysteresisLocation_r17;  
+          params->d1.report_on_leave     = d1->reportOnLeave_r17;  
+          params->d1.ttt              = get_event_time_to_trigger(d1->timeToTrigger_r17);  
+
+          params->d1.ref_loc1.size = d1->referenceLocation1_r17.size;  
+          params->d1.ref_loc1.buf = malloc(d1->referenceLocation1_r17.size);  
+          AssertFatal(params->d1.ref_loc1.buf, "out of memory\n");  
+          memcpy(params->d1.ref_loc1.buf, d1->referenceLocation1_r17.buf, d1->referenceLocation1_r17.size);  
+
+          params->d1.ref_loc2.size = d1->referenceLocation2_r17.size;  
+          params->d1.ref_loc2.buf = malloc(d1->referenceLocation2_r17.size);  
+          AssertFatal(params->d1.ref_loc2.buf, "out of memory\n");  
+          memcpy(params->d1.ref_loc2.buf, d1->referenceLocation2_r17.buf, d1->referenceLocation2_r17.size);  
+
+          params->d1.configured = true;  
+          LOG_I(NR_RRC, "measId %ld: configured eventD1 thresh1=%ld thresh2=%ld hyst=%ld ttt=%ldms\n",  
+                id, params->d1.distance_thresh1, params->d1.distance_thresh2,  
+                params->d1.hysteresis_location, params->d1.ttt);  
+        }  
+      }  
       // Check for periodical report and extract neighbor cell info for MAC
       else if (reportNR->reportType.present == NR_ReportConfigNR__reportType_PR_periodical) {
         NR_PeriodicalReportConfig_t *periodical_config = reportNR->reportType.choice.periodical;
@@ -3022,6 +3064,43 @@ static void stop_meas_event(meas_report_params_t *params, NR_timer_t *event_time
   params->reports_sent = 0;
 }
 
+// TS 23.032 Section 5 - WGS84 geodetic (degrees) -> ECEF (meters)  
+static position_t geodetic_to_ecef(double lat_deg, double lon_deg, double alt_m)  
+{
+  const double WGS84_A  = 6378137.0;            // semi-major axis
+  const double WGS84_E2  = 6.69437999014e-3;    // first eccentricity squared  minor axis
+  double lat = lat_deg * M_PI / 180.0;
+  double lon = lon_deg * M_PI / 180.0;
+  double N = WGS84_A / sqrt(1.0 - WGS84_E2  * sin(lat) * sin(lat));
+  return (position_t){
+    .X = (N + alt_m) * cos(lat) * cos(lon),
+    .Y = (N + alt_m) * cos(lat) * sin(lon),
+    .Z = (N * (1.0 - WGS84_E2) + alt_m) * sin(lat),
+  };
+}
+
+// Decode ReferenceLocation-r17 (OCTET STRING) -> ECEF.
+// NOTE: verify the octet layout against your gNB's encoder — see caveat below.
+// Common encoding: 24-bit latitude + 24-bit longitude (TS 23.032 ellipsoid point),
+// latitude = raw * 90 / 2^23, longitude = raw * 360 / 2^24 (two's complement).
+static bool decode_reference_location(const NR_ReferenceLocation_r17_t *ref, position_t *ecef)
+{
+  if (!ref || !ref->buf || ref->size < 6) {
+    LOG_E(NR_RRC, "D1: invalid referenceLocation (size %d)\n", ref ? (int)ref->size : -1);
+    return false;
+  }
+  int32_t lat_raw = (ref->buf[0] << 16) | (ref->buf[1] << 8) | ref->buf[2];
+  if (lat_raw & 0x800000) lat_raw |= ~0xFFFFFF;   // sign-extend 24-bit
+  int32_t lon_raw = (ref->buf[3] << 16) | (ref->buf[4] << 8) | ref->buf[5];
+  if (lon_raw & 0x800000) lon_raw |= ~0xFFFFFF;
+
+  //TS 23.032 Section 6 Description of Geographic Area Shapes
+  double lat_deg = (double)lat_raw * 90.0  / (1 << 23);
+  double lon_deg = (double)lon_raw * 360.0 / (1 << 24);
+  *ecef = geodetic_to_ecef(lat_deg, lon_deg, 0.0);
+  return true;
+}
+
 // TS 38.331 - 5.5.4.3 Event A2 (Serving becomes worse than threshold)
 static void handle_event_a2(l3_measurements_t *l3_measurements,
                             rrcPerNB_t *rrcNB,
@@ -3143,6 +3222,77 @@ static void handle_event_a3(l3_measurements_t *l3_measurements,
   }
 }
 
+// TS 38.331 - 5.5.4.15a Event D1 (Distance between UE and referenceLocation1  
+// becomes larger than threshold1, and/or distance to referenceLocation2  
+// becomes shorter than threshold2)  
+static void handle_event_d1(l3_measurements_t *l3_measurements,  
+                            rrcPerNB_t *rrcNB,  
+                            struct NR_EventTriggerConfig__eventId__ext1__eventD1_r17 *event_d1,  
+                            NR_EventTriggerConfig_t *event_trigger_config,  
+                            long report_config_id,  
+                            instance_t ue_id)  
+{
+  int meas_id = get_meas_id(rrcNB, report_config_id);  
+  if (meas_id < 0)  
+    return;
+
+  meas_report_params_t *params = &l3_measurements->meas_report[meas_id];  
+  if (!params->d1.configured)  
+    return;  
+
+  // UE position in ECEF (same source as NTN TA code)  
+  position_t pos_ue = {0};  
+  get_position_coordinates(ue_id, &pos_ue);  
+  
+  // Reference location 1 in ECEF  
+  position_t pos_ref1;  
+  if (!decode_reference_location(&params->d1.ref_loc1, &pos_ref1))  
+    return;  
+
+  const double dist1 = sqrt(pow(pos_ue.X - pos_ref1.X, 2)  
+                          + pow(pos_ue.Y - pos_ref1.Y, 2)  
+                          + pow(pos_ue.Z - pos_ref1.Z, 2));  
+  
+  const double thresh1 = params->d1.distance_thresh1;   // meters  
+  const double hyst    = params->d1.hysteresis_location; // meters  
+  
+  // 38.331 5.5.4.15a:  
+  //   entering: dist(UE, ref1) > thresh1 + hyst   (UE moved AWAY from ref1)  
+  //   leaving : dist(UE, ref1) < thresh1 - hyst  
+  // (If you use the "approaching" semantics instead, swap the inequalities —  
+  //  check the exact 5.5.4.15a text for which direction your deployment needs.)  
+
+  bool entry_cond_met  = (dist1 > thresh1 + hyst);  
+  bool leave_cond_met  = (dist1 < thresh1 - hyst);  
+
+  // Optional second condition on referenceLocation2 (ANDed per spec when configured)  
+  if (params->d1.ref_loc2.buf && params->d1.ref_loc2.size >= 6) {  
+    position_t pos_ref2;  
+    if (decode_reference_location(&params->d1.ref_loc2, &pos_ref2)) {  
+      const double dist2 = sqrt(pow(pos_ue.X - pos_ref2.X, 2)  
+                              + pow(pos_ue.Y - pos_ref2.Y, 2)  
+                              + pow(pos_ue.Z - pos_ref2.Z, 2));  
+      const double thresh2 = params->d1.distance_thresh2;  
+      entry_cond_met = entry_cond_met && (dist2 < thresh2 - hyst);  
+      leave_cond_met = leave_cond_met || (dist2 > thresh2 + hyst);  
+    }  
+  }  
+
+  if (entry_cond_met && !nr_timer_is_active(&params->d1.TD1) && (params->reports_sent == 0)) {  
+    nr_timer_setup(&params->d1.TD1, params->d1.ttt, 10);  
+    nr_timer_start(&params->d1.TD1);  
+    params->trigger_quantity = 1;   // mark event as triggered for handle_meas_timers()  
+    LOG_W(NR_RRC, "Event D1 entry: dist(UE,ref1) %.0f m > thresh1 %.0f + hyst %.0f\n",  
+          dist1, thresh1, hyst);  
+  } else if (nr_timer_is_active(&params->d1.TD1) && leave_cond_met) {  
+    nr_timer_stop(&params->d1.TD1);  
+    params->reports_sent = 0;  
+    LOG_W(NR_RRC, "Event D1 leave: dist(UE,ref1) %.0f m < thresh1 %.0f - hyst %.0f\n",  
+          dist1, thresh1, hyst);  
+  }
+}
+
+
 static void nr_ue_check_meas_report(NR_UE_RRC_INST_t *rrc, const uint8_t gnb_index)
 {
   rrcPerNB_t *rrcNB = rrc->perNB + gnb_index;
@@ -3176,6 +3326,16 @@ static void nr_ue_check_meas_report(NR_UE_RRC_INST_t *rrc, const uint8_t gnb_ind
                         event_trigger_config->eventId.choice.eventA3,
                         event_trigger_config,
                         report_config->reportConfigId);
+        break;
+      case NR_EventTriggerConfig__eventId_PR_eventD1_r17:
+        if (event_trigger_config->eventId.choice.eventD1_r17) {	
+          handle_event_d1(l3_measurements,  
+        				rrcNB,	
+        				&event_trigger_config->eventId.choice.eventD1_r17,  
+        				event_trigger_config,  
+        				report_config->reportConfigId,	
+        				rrc->ue_id);  
+        }
         break;
       default:
         break;

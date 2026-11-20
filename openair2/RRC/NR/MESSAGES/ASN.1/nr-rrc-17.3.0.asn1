@@ -9357,6 +9357,7 @@ EventTriggerConfig::=                       SEQUENCE {
             timeToTrigger                               TimeToTrigger,
             useAllowedCellList                          BOOLEAN
         },
+        eventD1-r17                                 SEQUENCE {                          distanceThreshFromReference1-r17            INTEGER(1.. 65525),             distanceThreshFromReference2-r17            INTEGER(1.. 65525),             referenceLocation1-r17                      ReferenceLocation-r17,                                                                                      referenceLocation2-r17                      ReferenceLocation-r17,                                                                                      reportOnLeave-r17                           BOOLEAN,                        hysteresisLocation-r17                      HysteresisLocation-r17,                                                                                     timeToTrigger-r17                           TimeToTrigger               },
         ...,
         [[
         eventX1-r17                                 SEQUENCE {
@@ -9371,15 +9372,6 @@ EventTriggerConfig::=                       SEQUENCE {
             x2-Threshold-Relay-r17                      SL-MeasTriggerQuantity-r16,
             reportOnLeave-r17                           BOOLEAN,
             hysteresis-r17                              Hysteresis,
-            timeToTrigger-r17                           TimeToTrigger
-        },
-        eventD1-r17                                 SEQUENCE {
-            distanceThreshFromReference1-r17            INTEGER(1.. 65525),
-            distanceThreshFromReference2-r17            INTEGER(1.. 65525),
-            referenceLocation1-r17                      ReferenceLocation-r17,
-            referenceLocation2-r17                      ReferenceLocation-r17,
-            reportOnLeave-r17                           BOOLEAN,
-            hysteresisLocation-r17                      HysteresisLocation-r17,
             timeToTrigger-r17                           TimeToTrigger
         }
         ]]

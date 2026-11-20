@@ -141,6 +141,17 @@ void handle_meas_timers(NR_UE_RRC_INST_t *rrc)
           nr_timer_start(&params->periodic_report_timer);
         }
       }
+      // Handle Event D1 timer expiry
+      bool td1_expired = nr_timer_tick(&params->d1.TD1);
+      if (td1_expired && params->d1.configured) {
+        rrc_ue_generate_measurementReport(nb, rrc->ue_id, meas_id);
+        params->reports_sent = 1;
+
+        if (params->reports_sent < params->max_reports && !nr_timer_is_active(&params->periodic_report_timer)) {
+          nr_timer_setup(&params->periodic_report_timer, params->report_interval_ms, 10);
+          nr_timer_start(&params->periodic_report_timer);
+        }
+      }
 
       // Handle periodical report
       // Per TS 38.331 Section 5.5.4.1, initiate measurement reporting immediately

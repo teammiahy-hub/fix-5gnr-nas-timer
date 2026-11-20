@@ -2302,6 +2302,29 @@ static void fill_measurement_configuration(uint8_t gnb_idx, gNB_RRC_INST *rrc)
 
     measurementConfig->a2_event = a2_event;
   }
+
+  // D1 Event Configuration (NTN distance-based, 38.331 eventD1-r17)
+  char d1_path[MAX_OPTNAME_SIZE + 8];
+  snprintf(d1_path, sizeof(d1_path), "%s.[%i].%s.%s", GNB_CONFIG_STRING_GNB_LIST, gnb_idx, GNB_CONFIG_STRING_MEASUREMENT_CONFIGURATION, MEASUREMENT_EVENTS_D1);
+  GET_PARAMS(D1_EventParams, MEASUREMENT_D1_GLOBALPARAMS_DESC, d1_path);
+
+  if (*D1_EventParams[MEASUREMENT_EVENTS_ENABLE_IDX].i64ptr) {
+    nr_d1_event_t *d1_event = calloc_or_fail(1, sizeof(nr_d1_event_t));
+       d1_event->distance_thresh1        = *D1_EventParams[MEASUREMENT_EVENTS_D1_DISTANCE_THRESH1_IDX].i64ptr;
+       d1_event->distance_thresh2        = *D1_EventParams[MEASUREMENT_EVENTS_D1_DISTANCE_THRESH2_IDX].i64ptr;
+       d1_event->ref_loc1_lat            = *D1_EventParams[MEASUREMENT_EVENTS_D1_REF_LOC1_LAT_IDX].dblptr;
+       d1_event->ref_loc1_lon            = *D1_EventParams[MEASUREMENT_EVENTS_D1_REF_LOC1_LON_IDX].dblptr;
+       d1_event->ref_loc2_lat            = *D1_EventParams[MEASUREMENT_EVENTS_D1_REF_LOC2_LAT_IDX].dblptr;
+       d1_event->ref_loc2_lon            = *D1_EventParams[MEASUREMENT_EVENTS_D1_REF_LOC2_LON_IDX].dblptr;
+       d1_event->hysteresis_location = *D1_EventParams[MEASUREMENT_EVENTS_D1_HYSTERESIS_LOC_IDX].i64ptr;
+       d1_event->timeToTrigger           = *D1_EventParams[MEASUREMENT_EVENTS_D1_TIMETOTRIGGER_IDX].i64ptr;
+       d1_event->report_on_leave         = *D1_EventParams[MEASUREMENT_EVENTS_D1_REPORT_ON_LEAVE_IDX].i64ptr;
+
+    measurementConfig->d1_event = d1_event;
+    LOG_I(GNB_APP, "D1 event configured: thresh1=%ldm ref1=(%.6f,%.6f) ttt=%ldms\n",
+          d1_event->distance_thresh1, d1_event->ref_loc1_lat, d1_event->ref_loc1_lon, d1_event->timeToTrigger);
+  }
+
   // A3 Event Configuration
   GET_PARAMS_LIST(A3_EventList, A3_EventParams, MEASUREMENT_A3_GLOBALPARAMS_DESC, MEASUREMENT_EVENTS_A3, measurement_path);
 

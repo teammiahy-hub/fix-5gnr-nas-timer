@@ -414,6 +414,7 @@ typedef enum {
 #define MEASUREMENT_EVENTS_PERIODICAL "Periodical"
 #define MEASUREMENT_EVENTS_A2 "A2"
 #define MEASUREMENT_EVENTS_A3 "A3"
+#define MEASUREMENT_EVENTS_D1 "D1"
 
 #define MEASUREMENT_EVENTS_OFFSET "offset"
 #define MEASUREMENT_EVENTS_HYSTERESIS "hysteresis"
@@ -423,6 +424,28 @@ typedef enum {
 #define MEASUREMENT_EVENTS_PERIODICAL_NR_OF_RS_INDEXES "maxNrofRS_IndexesToReport"
 #define MEASUREMENT_EVENTS_PCI_ID "physCellId"
 #define MEASUREMENT_EVENT_ENABLE "enable"
+
+// String names <97> used in the paramdesc entries
+#define MEASUREMENT_EVENTS_D1_DISTANCE_THRESH1 "distance_thresh1"
+#define MEASUREMENT_EVENTS_D1_DISTANCE_THRESH2 "distance_thresh2"
+#define MEASUREMENT_EVENTS_D1_REF_LOC1_LAT     "ref_lat1"
+#define MEASUREMENT_EVENTS_D1_REF_LOC1_LON     "ref_lon1"
+#define MEASUREMENT_EVENTS_D1_REF_LOC2_LAT     "ref_lat2"
+#define MEASUREMENT_EVENTS_D1_REF_LOC2_LON     "ref_lon2"
+#define MEASUREMENT_EVENTS_D1_HYSTERESIS_LOC   "hysteresis_location"
+#define MEASUREMENT_EVENTS_D1_REPORT_ON_LEAVE  "report_on_leave"
+
+// Integer indices <97> used to subscript D1_EventParams[]
+#define MEASUREMENT_EVENTS_D1_DISTANCE_THRESH1_IDX 1
+#define MEASUREMENT_EVENTS_D1_DISTANCE_THRESH2_IDX 2
+#define MEASUREMENT_EVENTS_D1_REF_LOC1_LAT_IDX     3
+#define MEASUREMENT_EVENTS_D1_REF_LOC1_LON_IDX     4
+#define MEASUREMENT_EVENTS_D1_REF_LOC2_LAT_IDX     5
+#define MEASUREMENT_EVENTS_D1_REF_LOC2_LON_IDX     6
+#define MEASUREMENT_EVENTS_D1_HYSTERESIS_LOC_IDX   7
+#define MEASUREMENT_EVENTS_D1_TIMETOTRIGGER_IDX    8
+#define MEASUREMENT_EVENTS_D1_REPORT_ON_LEAVE_IDX  9
+
 // clang-format off
 #define MEASUREMENT_A3_GLOBALPARAMS_DESC                                                                                      \
   {                                                                                                                               \
@@ -437,6 +460,20 @@ typedef enum {
         {MEASUREMENT_EVENT_ENABLE, "enable the event", 0, .i64ptr = NULL, .defint64val = 1, TYPE_INT64, 0}, \
         {MEASUREMENT_EVENTS_TIME_TO_TRIGGER, "a2 time to trigger", 0, .i64ptr = NULL, .defint64val = 1, TYPE_INT64, 0}, \
         {MEASUREMENT_EVENTS_THRESHOLD, "a2 threshold", 0, .i64ptr = NULL, .defint64val = 60, TYPE_INT64, 0},            \
+  }
+
+#define MEASUREMENT_D1_GLOBALPARAMS_DESC \
+  { \
+    {MEASUREMENT_EVENT_ENABLE,                "enable the event",                    0,              .i64ptr = NULL, .defint64val = 0,    TYPE_INT64,  0}, \
+    {MEASUREMENT_EVENTS_D1_DISTANCE_THRESH1,  "d1 distance thresh from ref1 (m)",    0,              .i64ptr = NULL, .defint64val = 1000, TYPE_INT64,  0}, \
+    {MEASUREMENT_EVENTS_D1_DISTANCE_THRESH2,  "d1 distance thresh from ref2 (m)",    0,              .i64ptr = NULL, .defint64val = 1000, TYPE_INT64,  0}, \
+    {MEASUREMENT_EVENTS_D1_REF_LOC1_LAT,      "d1 ref location 1 latitude (deg)",    0,              .dblptr  = NULL, .defdblval   = 0.0,  TYPE_DOUBLE, 0}, \
+    {MEASUREMENT_EVENTS_D1_REF_LOC1_LON,      "d1 ref location 1 longitude (deg)",   0,              .dblptr  = NULL, .defdblval   = 0.0,  TYPE_DOUBLE, 0}, \
+    {MEASUREMENT_EVENTS_D1_REF_LOC2_LAT,      "d1 ref location 2 latitude (deg)",    0,              .dblptr  = NULL, .defdblval   = 0.0,  TYPE_DOUBLE, 0}, \
+    {MEASUREMENT_EVENTS_D1_REF_LOC2_LON,      "d1 ref location 2 longitude (deg)",   0,              .dblptr  = NULL, .defdblval   = 0.0,  TYPE_DOUBLE, 0}, \
+    {MEASUREMENT_EVENTS_D1_HYSTERESIS_LOC,    "d1 hysteresis location (m)",          0,              .i64ptr = NULL, .defint64val = 0,    TYPE_INT64,  0}, \
+    {MEASUREMENT_EVENTS_TIME_TO_TRIGGER,      "d1 time to trigger",                  0,              .i64ptr = NULL, .defint64val = 1,    TYPE_INT64,  0}, \
+    {MEASUREMENT_EVENTS_D1_REPORT_ON_LEAVE,   "d1 report on leave",                  PARAMFLAG_BOOL, .i64ptr = NULL, .defint64val = 0,    TYPE_INT64,  0}, \
   }
 
 #define MEASUREMENT_PERIODICAL_GLOBALPARAMS_DESC                                                                                      \

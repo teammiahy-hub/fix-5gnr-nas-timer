@@ -311,10 +311,23 @@ typedef struct {
   long timeToTrigger;
 } nr_a3_event_t;
 
+typedef struct {  
+  long distance_thresh1;      // distanceThreshFromReference1-r17 (meters, 1..65525)  
+  long distance_thresh2;      // distanceThreshFromReference2-r17  
+  double ref_loc1_lat;        // referenceLocation1, geodetic degrees  
+  double ref_loc1_lon;  
+  double ref_loc2_lat;        // referenceLocation2  
+  double ref_loc2_lon;  
+  long hysteresis_location;   // hysteresisLocation-r17 (0..32768, meters)  
+  long timeToTrigger;         // ms  
+  bool report_on_leave;       // reportOnLeave-r17  
+} nr_d1_event_t;  
+
 typedef struct {
   nr_per_event_t *per_event;
   nr_a2_event_t *a2_event;
   seq_arr_t *a3_event_list;
+  nr_d1_event_t *d1_event;    // NEW: NULL when not configured  
   bool is_default_a3_configuration_exists;
 } nr_measurement_configuration_t;
 

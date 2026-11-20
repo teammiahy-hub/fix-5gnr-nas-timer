@@ -705,6 +705,42 @@ static nr_a3_event_t *get_a3_configuration(gNB_RRC_INST *rrc, int pci)
   return NULL;
 }
 
+static NR_TimeToTrigger_t ms_to_time_to_trigger(long ms)
+{
+  switch (ms) {
+    case 0:    return NR_TimeToTrigger_ms0;
+    case 40:   return NR_TimeToTrigger_ms40;
+    case 64:   return NR_TimeToTrigger_ms64;
+    case 80:   return NR_TimeToTrigger_ms80;
+    case 100:  return NR_TimeToTrigger_ms100;
+    case 128:  return NR_TimeToTrigger_ms128;
+    case 160:  return NR_TimeToTrigger_ms160;
+    case 256:  return NR_TimeToTrigger_ms256;
+    case 320:  return NR_TimeToTrigger_ms320;
+    case 480:  return NR_TimeToTrigger_ms480;
+    case 512:  return NR_TimeToTrigger_ms512;
+    case 640:  return NR_TimeToTrigger_ms640;
+    case 1024: return NR_TimeToTrigger_ms1024;
+    case 1280: return NR_TimeToTrigger_ms1280;
+    case 2560: return NR_TimeToTrigger_ms2560;
+    case 5120: return NR_TimeToTrigger_ms5120;
+    default:
+      AssertFatal(false, "Invalid timeToTrigger %ld ms <97> must be a 38.331 TimeToTrigger value\n", ms);
+  }
+}
+
+static void encode_reference_location(NR_ReferenceLocation_r17_t *ref, double lat_deg, double lon_deg)
+{
+  // Example layout: 3-byte lat + 3-byte lon, 2^-23 * 180 / 2^-23 * 360 scaling
+  ref->size = 7;
+  ref->buf = calloc_or_fail(ref->size, sizeof(uint8_t));
+  ref->buf[0] = 0x00; // type: ellipsoid point
+  int32_t lat = (int32_t)lround(lat_deg * (1 << 23) / 180.0);
+  int32_t lon = (int32_t)lround(lon_deg * (1 << 23) / 360.0);
+  ref->buf[1] = (lat >> 16) & 0xFF; ref->buf[2] = (lat >> 8) & 0xFF; ref->buf[3] = lat & 0xFF;
+  ref->buf[4] = (lon >> 16) & 0xFF; ref->buf[5] = (lon >> 8) & 0xFF; ref->buf[6] = lon & 0xFF;
+}
+
 static NR_ReportConfigToAddMod_t *prepare_periodic_event_report(gNB_RRC_UE_t *ue, const nr_per_event_t *per_event)
 {
   NR_ReportConfigToAddMod_t *rc = calloc(1, sizeof(*rc));
@@ -764,6 +800,44 @@ static NR_ReportConfigToAddMod_t *prepare_a2_event_report(gNB_RRC_UE_t *ue, cons
   return rc_A2;
 }
 
+static NR_ReportConfigToAddMod_t *prepare_d1_event_report(gNB_RRC_UE_t *ue, const nr_d1_event_t *d1)
+{
+  NR_ReportConfigToAddMod_t *rc_D1 = calloc_or_fail(1, sizeof(*rc_D1));
+  rc_D1->reportConfigId = allocate_report_config_id(ue);
+  rc_D1->reportConfig.present = NR_ReportConfigToAddMod__reportConfig_PR_reportConfigNR;
+  NR_ReportConfigNR_t *report = calloc_or_fail(1, sizeof(*report));
+  rc_D1->reportConfig.choice.reportConfigNR = report;
+
+  report->reportType.present = NR_ReportConfigNR__reportType_PR_eventTriggered;
+  NR_EventTriggerConfig_t *etc = calloc_or_fail(1, sizeof(*etc));
+  report->reportType.choice.eventTriggered = etc;
+
+  // eventD1 is a root CHOICE alternative <97> member is a POINTER, allocate it
+  etc->eventId.present = NR_EventTriggerConfig__eventId_PR_eventD1_r17;
+  asn1cCallocOne(etc->eventId.choice.eventD1_r17,
+                 (struct NR_EventTriggerConfig__eventId__eventD1_r17){0}); 
+  struct NR_EventTriggerConfig__eventId__eventD1_r17 *d1ev = etc->eventId.choice.eventD1_r17;
+
+  d1ev->distanceThreshFromReference1_r17 = d1->distance_thresh1;
+  d1ev->distanceThreshFromReference2_r17 = d1->distance_thresh2;
+  encode_reference_location(&d1ev->referenceLocation1_r17, d1->ref_loc1_lat, d1->ref_loc1_lon);
+  encode_reference_location(&d1ev->referenceLocation2_r17, d1->ref_loc2_lat, d1->ref_loc2_lon);
+  d1ev->reportOnLeave_r17 = d1->report_on_leave;
+  d1ev->hysteresisLocation_r17 = d1->hysteresis_location;
+  d1ev->timeToTrigger_r17 = ms_to_time_to_trigger(d1->timeToTrigger);
+
+  etc->rsType = NR_NR_RS_Type_ssb;
+  etc->reportInterval = NR_ReportInterval_ms240;
+  etc->reportAmount = NR_EventTriggerConfig__reportAmount_infinity;
+  etc->reportQuantityCell.rsrp = true;
+  etc->reportQuantityCell.rsrq = false;
+  etc->reportQuantityCell.sinr = false;
+  etc->maxReportCells = 1;
+
+  return rc_D1;
+}
+
+
 static NR_ReportConfigToAddMod_t *prepare_a3_event_report(const nr_a3_event_t *a3_event, NR_ReportConfigId_t reportConfigId)
 {
   NR_ReportConfigToAddMod_t *rc_A3 = calloc(1, sizeof(*rc_A3));
@@ -813,6 +887,7 @@ NR_MeasConfig_t *nr_rrc_get_measconfig(const gNB_RRC_INST *rrc, uint64_t nr_cell
   if (cell->mtc != NULL) {
     NR_ReportConfigToAddMod_t *rc_PER = NULL;
     NR_ReportConfigToAddMod_t *rc_A2 = NULL;
+	NR_ReportConfigToAddMod_t *rc_D1 = NULL;
     seq_arr_t rc_A3_seq = {0};
     seq_arr_t neigh_seq = {0};
     seq_arr_init(&rc_A3_seq, sizeof(NR_ReportConfigToAddMod_t));
@@ -877,8 +952,10 @@ NR_MeasConfig_t *nr_rrc_get_measconfig(const gNB_RRC_INST *rrc, uint64_t nr_cell
       rc_PER = prepare_periodic_event_report(ue, meas_cfg->per_event);
     if (meas_cfg->a2_event)
       rc_A2 = prepare_a2_event_report(ue, meas_cfg->a2_event);
+    if (meas_cfg->d1_event)
+      rc_D1 = prepare_d1_event_report(ue, meas_cfg->d1_event);
 
-    NR_MeasConfig_t *result = get_MeasConfig(ue, mt, band, cell->info.pci, rc_PER, rc_A2, &rc_A3_seq, &neigh_seq, neigh_a3_id);
+    NR_MeasConfig_t *result = get_MeasConfig(ue, mt, band, cell->info.pci, rc_PER, rc_A2, rc_D1, &rc_A3_seq, &neigh_seq, neigh_a3_id);
 
     // Clean up sequence arrays
     seq_arr_free(&rc_A3_seq, NULL);
@@ -1868,6 +1945,40 @@ static void process_Event_Based_Measurement_Report(gNB_RRC_INST *rrc,
         } else {
           LOG_W(NR_RRC, "UE %d: received A3 event for stronger neighbor PCI %d, but no such neighbour in configuration\n", ue->rrc_ue_id, neighbour_pci);
         }
+      }
+    } break;
+    case NR_EventTriggerConfig__eventId_PR_eventD1_r17: {
+      LOG_I(NR_RRC, "HO LOG: Event D1 Report for UE %d <97> distance threshold crossed\n", ue->rrc_ue_id);
+
+      // Resolve source cell from UE's serving cells
+      const nr_rrc_cell_container_t *source_cell = rrc_get_pcell_for_ue(rrc, ue);
+      if (source_cell == NULL) {
+        LOG_E(NR_RRC, "UE %d: D1 report but no source cell found\n", ue->rrc_ue_id);
+        break;
+      }
+
+      // Get neighbour list of the source cell
+      const neighbour_cell_configuration_t *cell = get_neighbour_cell_config(rrc, source_cell->info.cell_id);
+      if (cell == NULL || seq_arr_size(&cell->neighbour_cells) == 0) {
+        LOG_W(NR_RRC, "UE %d: D1 report but no neighbours configured for cell %ld\n",
+              ue->rrc_ue_id, source_cell->info.cell_id);
+        break;
+      }
+
+      // Pick target: first configured neighbour (2-cell setup).
+      // For multiple neighbours, add your own selection policy here
+      // (e.g., map ref_loc -> specific neighbour).
+      const nr_neighbour_cell_t *neighbour = (const nr_neighbour_cell_t *)seq_arr_at(&cell->neighbour_cells, 0);
+
+      // Same decision logic as A3: is the target one of our DUs?
+      const nr_rrc_cell_container_t *target_cell = get_cell_by_cell_id(&rrc->cells, neighbour->nrcell_id);
+      if (target_cell != NULL) {
+        LOG_I(NR_RRC, "HO LOG: D1 ? F1 HO, source PCI %d ? target PCI %d (cell %ld)\n",
+              source_cell->info.pci, neighbour->physicalCellId, neighbour->nrcell_id);
+        nr_rrc_trigger_f1_ho(rrc, ue, source_cell, target_cell);
+      } else {
+        LOG_I(NR_RRC, "HO LOG: D1 ? N2 HO, target cell %ld not local to this CU\n", neighbour->nrcell_id);
+        nr_rrc_trigger_n2_ho(rrc, ue, neighbour);
       }
     } break;
     default:

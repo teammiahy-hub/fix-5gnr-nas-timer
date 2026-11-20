@@ -171,6 +171,20 @@ typedef enum {
 
 typedef enum { RB_NOT_PRESENT, RB_ESTABLISHED, RB_SUSPENDED } NR_RB_status_t;
 
+
+// in meas_report_params_t
+typedef struct {
+  long distance_thresh1;      // distanceThreshFromReference1_r17 (meters)
+  long distance_thresh2;      // distanceThreshFromReference2_r17
+  NR_ReferenceLocation_r17_t  ref_loc1;   // geodetic lat/long
+  NR_ReferenceLocation_r17_t  ref_loc2;
+  long hysteresis_location;   // HysteresisLocation-r17 (0..32768, meters)
+  bool report_on_leave;       // reportOnLeave-r17  
+  NR_TimeToTrigger_t ttt;
+  NR_timer_t TD1;             // time-to-trigger timer, like TA3
+  bool configured;
+} d1_t;
+
 typedef struct meas_report_params_s {
   long trigger_quantity;
   long rs_type;
@@ -183,6 +197,7 @@ typedef struct meas_report_params_s {
   NR_timer_t TA2;
   NR_timer_t TA3;
   NR_timer_t periodic_report_timer;
+  d1_t d1;
 } meas_report_params_t;
 
 typedef struct l3_measurements_s {
